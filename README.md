@@ -2,6 +2,8 @@
 
 这是一个基于 Go 语言编写的 Telegram 机器人，用于查询完美校园（WanXiao）绑定的宿舍剩余电量，并支持低电量自动预警功能。
 
+<img height="600" alt="QQ20251129-235236" src="https://github.com/user-attachments/assets/24f455c5-ab66-40f5-98ef-d1ed66ee08ca" />
+
 ## 功能特性
 
 *   **交互式菜单**：通过底部键盘和按钮进行操作，无需记忆复杂命令。
