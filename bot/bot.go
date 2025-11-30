@@ -35,14 +35,28 @@ type Bot struct {
 	stateLock sync.RWMutex
 }
 
-func escapeMarkdown(text string) string {
-	replacer := strings.NewReplacer(
-		"_", "\\_",
-		"*", "\\*",
-		"[", "\\[",
-		"`", "\\`",
-	)
-	return replacer.Replace(text)
+func escapeMarkdownV2(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!', '\\':
+			b.WriteRune('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func escapeMarkdownV2Code(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case '`', '\\':
+			b.WriteRune('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // Keyboards
@@ -170,16 +184,16 @@ func (bot *Bot) handleElec(c telebot.Context) error {
 
 	msg, _ := bot.B.Send(c.Recipient(), "正在查询中，请稍候...")
 
-	statusMsg := "📊 **电量状态**:\n\n"
+	statusMsg := "📊 *电量状态*:\n\n"
 	for _, b := range bindings {
 		rooms, err := bot.Client.GetBalance(b.Account, b.CustomerCode)
 		if err != nil {
-			statusMsg += fmt.Sprintf("❌ 账号 `%s`: 查询失败 (%v)\n", b.Account, err)
+			statusMsg += fmt.Sprintf("❌ 账号 `%s`: 查询失败 \\(%s\\)\n", escapeMarkdownV2Code(b.Account), escapeMarkdownV2(err.Error()))
 			continue
 		}
 
 		for _, room := range rooms {
-			statusMsg += fmt.Sprintf("🏠 **%s**\n⚡ 余额: `%.2f` 度\n\n", escapeMarkdown(room.RoomName), room.Balance)
+			statusMsg += fmt.Sprintf("🏠 *%s*\n⚡ 余额: `%.2f` 度\n\n", escapeMarkdownV2(room.RoomName), room.Balance)
 
 			// Update cache
 			b.LastBalance = room.Balance
@@ -193,7 +207,7 @@ func (bot *Bot) handleElec(c telebot.Context) error {
 	if msg != nil {
 		bot.B.Delete(msg)
 	}
-	return c.Send(statusMsg, telebot.ModeMarkdown)
+	return c.Send(statusMsg, telebot.ModeMarkdownV2)
 }
 
 // 👤 Account Management
@@ -204,7 +218,7 @@ func (bot *Bot) handleAccounts(c telebot.Context) error {
 
 	menu := &telebot.ReplyMarkup{}
 
-	msg := "📋 **账号列表**:\n"
+	msg := "📋 *账号列表*:\n"
 	if len(bindings) == 0 {
 		msg += "暂无绑定账号。\n"
 	}
@@ -213,7 +227,7 @@ func (bot *Bot) handleAccounts(c telebot.Context) error {
 	rows = append(rows, menu.Row(btnAddAccount))
 
 	for _, b := range bindings {
-		msg += fmt.Sprintf("- `%s` (%s)\n", escapeMarkdown(b.Account), escapeMarkdown(b.RoomName))
+		msg += fmt.Sprintf("\\- `%s` \\(%s\\)\n", escapeMarkdownV2Code(b.Account), escapeMarkdownV2(b.RoomName))
 		// Add delete button for each account
 		// Unique payload: unbind_<account>
 		btnDelete := telebot.Btn{
@@ -225,12 +239,12 @@ func (bot *Bot) handleAccounts(c telebot.Context) error {
 	}
 
 	menu.Inline(rows...)
-	return c.Send(msg, menu, telebot.ModeMarkdown)
+	return c.Send(msg, menu, telebot.ModeMarkdownV2)
 }
 
 func (bot *Bot) handleAddAccountBtn(c telebot.Context) error {
 	bot.setState(c.Sender().ID, StateAddAccount_WaitAccount)
-	return c.Send("请输入**账号** (学号或卡号):", telebot.ModeMarkdown)
+	return c.Send("请输入 *账号* \\(学号或卡号\\):", telebot.ModeMarkdownV2)
 }
 
 // ⚙️ Settings
@@ -242,7 +256,7 @@ func (bot *Bot) handleSettings(c telebot.Context) error {
 		return c.Send("初始化用户数据...")
 	}
 
-	msg := fmt.Sprintf("⚙️ **预警设置**:\n\n"+
+	msg := fmt.Sprintf("⚙️ *预警设置*:\n\n"+
 		"📉 报警阈值: `%.2f` 度\n"+
 		"🔔 预警开关: `%v`\n"+
 		"⏱️ 检查间隔: `%d` 分钟",
@@ -254,7 +268,7 @@ func (bot *Bot) handleSettings(c telebot.Context) error {
 		menu.Row(btnToggleAlert),
 	)
 
-	return c.Send(msg, menu, telebot.ModeMarkdown)
+	return c.Send(msg, menu, telebot.ModeMarkdownV2)
 }
 
 func (bot *Bot) handleToggleAlert(c telebot.Context) error {
@@ -273,12 +287,12 @@ func (bot *Bot) handleToggleAlert(c telebot.Context) error {
 
 func (bot *Bot) handleSetThresholdBtn(c telebot.Context) error {
 	bot.setState(c.Sender().ID, StateSettings_WaitThreshold)
-	return c.Send("请输入新的**报警阈值** (例如 10):", telebot.ModeMarkdown)
+	return c.Send("请输入新的 *报警阈值* \\(例如 10\\):", telebot.ModeMarkdownV2)
 }
 
 func (bot *Bot) handleSetIntervalBtn(c telebot.Context) error {
 	bot.setState(c.Sender().ID, StateSettings_WaitInterval)
-	return c.Send("请输入新的**检查间隔** (分钟，例如 60):", telebot.ModeMarkdown)
+	return c.Send("请输入新的 *检查间隔* \\(分钟，例如 60\\):", telebot.ModeMarkdownV2)
 }
 
 // Global Text Handler (State Machine)
@@ -295,7 +309,7 @@ func (bot *Bot) handleText(c telebot.Context) error {
 		account := c.Text()
 		bot.setTempData(userID, "account", account)
 		bot.setState(userID, StateAddAccount_WaitCode)
-		return c.Send(fmt.Sprintf("收到账号 `%s`。\n请继续输入 **学校代码 (Customer Code)**:", escapeMarkdown(account)), telebot.ModeMarkdown)
+		return c.Send(fmt.Sprintf("收到账号 `%s`。\n请继续输入 *学校代码 \\(Customer Code\\)*:", escapeMarkdownV2Code(account)), telebot.ModeMarkdownV2)
 
 	case StateAddAccount_WaitCode:
 		code := c.Text()
@@ -333,7 +347,7 @@ func (bot *Bot) handleText(c telebot.Context) error {
 		bot.DB.Create(&binding)
 		bot.setState(userID, StateNone)
 
-		return c.Send(fmt.Sprintf("✅ **绑定成功！**\n🏠 房间: %s\n⚡ 当前余额: %.2f", escapeMarkdown(rooms[0].RoomName), rooms[0].Balance), telebot.ModeMarkdown)
+		return c.Send(fmt.Sprintf("✅ *绑定成功\\!*\n🏠 房间: %s\n⚡ 当前余额: `%.2f`", escapeMarkdownV2(rooms[0].RoomName), rooms[0].Balance), telebot.ModeMarkdownV2)
 
 	case StateSettings_WaitThreshold:
 		val, err := strconv.ParseFloat(c.Text(), 64)
@@ -413,9 +427,9 @@ func (bot *Bot) CheckLowBalance() {
 			for _, room := range rooms {
 				if room.Balance < user.NotifyThreshold {
 					// Alert!
-					msg := fmt.Sprintf("⚠️ **低电量预警！**\n\n🏠 房间: %s\n⚡ 余额: `%.2f` 度\n📉 阈值: %.2f 度",
-						escapeMarkdown(room.RoomName), room.Balance, user.NotifyThreshold)
-					bot.B.Send(&telebot.User{ID: user.ID}, msg, telebot.ModeMarkdown)
+					msg := fmt.Sprintf("⚠️ *低电量预警\\!*\n\n🏠 房间: %s\n⚡ 余额: `%.2f` 度\n📉 阈值: `%.2f` 度",
+						escapeMarkdownV2(room.RoomName), room.Balance, user.NotifyThreshold)
+					bot.B.Send(&telebot.User{ID: user.ID}, msg, telebot.ModeMarkdownV2)
 				}
 
 				// Update cache
