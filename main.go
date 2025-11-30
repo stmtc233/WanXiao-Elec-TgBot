@@ -8,8 +8,8 @@ import (
 	"wanxiao-elec-bot/bot"
 	"wanxiao-elec-bot/model"
 
+	"github.com/glebarez/sqlite"
 	"github.com/robfig/cron/v3"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
