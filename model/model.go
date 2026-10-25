@@ -25,6 +25,7 @@ type Binding struct {
 
 	// Cache/Display info
 	RoomName    string
+	RoomVerify  string
 	LastBalance float64
 	LastCheck   time.Time
 }
