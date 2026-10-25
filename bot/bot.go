@@ -88,14 +88,6 @@ var (
 	btnUnbindOkEndpoint  = telebot.Btn{Unique: "unbind_ok"}
 )
 
-// knownSchools are offered as quick picks when adding an account.
-var knownSchools = []struct {
-	Name string
-	Code string
-}{
-	{"珠海科技学院", "1399"},
-}
-
 var botCommands = []telebot.Command{
 	{Text: "elec", Description: "查询电量"},
 	{Text: "recharge", Description: "充值电费"},
