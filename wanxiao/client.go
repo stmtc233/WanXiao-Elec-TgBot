@@ -18,16 +18,64 @@ const (
 	APIURL   = "https://xqh5.17wanxiao.com/smartWaterAndElectricityService/SWAEServlet"
 	GoPayURL = "https://xqh5.17wanxiao.com/smartWaterAndElectricityService/goPay"
 	TradeURL = "https://cloudpaygateway.59wanmei.com:8087/paygateway/smallpaygateway/trade"
+
+	userAgent       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+	maxResponseSize = 1 << 20
 )
+
+// SupportedSchoolCode defines the whitelisted school codes for recharge
+const SupportedSchoolCode = "1399"
+
+// APIError is a business error whose message is safe to show to users.
+type APIError struct {
+	Msg string
+}
+
+func (e *APIError) Error() string { return e.Msg }
+
+func apiErrorf(format string, args ...interface{}) error {
+	return &APIError{Msg: fmt.Sprintf(format, args...)}
+}
 
 type Client struct {
 	HTTPClient *http.Client
 }
 
 func NewClient() *Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConnsPerHost = 10
 	return &Client{
-		HTTPClient: &http.Client{Timeout: 15 * time.Second},
+		HTTPClient: &http.Client{Timeout: 15 * time.Second, Transport: transport},
 	}
+}
+
+// post sends a request and returns the (size limited) response body.
+func (c *Client) post(endpoint, contentType string, body string) ([]byte, error) {
+	req, err := http.NewRequest("POST", endpoint, strings.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request error: %w", err)
+	}
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("User-Agent", userAgent)
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request error: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
+	if err != nil {
+		return nil, fmt.Errorf("read body error: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected http status %d", resp.StatusCode)
+	}
+	return bodyBytes, nil
+}
+
+func (c *Client) postForm(endpoint string, data url.Values) ([]byte, error) {
+	return c.post(endpoint, "application/x-www-form-urlencoded", data.Encode())
 }
 
 type Param struct {
@@ -69,56 +117,36 @@ type RoomInfo struct {
 
 // GetRoomDetails queries getbindroom from SWAEServlet
 func (c *Client) GetRoomDetails(account, customerCode string) (*Body, error) {
-	timestamp := time.Now().Format("20060102150405000")
-
-	paramData := Param{
+	paramJSON, err := json.Marshal(Param{
 		Cmd:       "getbindroom",
 		Account:   account,
-		Timestamp: timestamp,
-	}
-
-	paramJSON, err := json.Marshal(paramData)
+		Timestamp: time.Now().Format("20060102150405000"),
+	})
 	if err != nil {
-		return nil, fmt.Errorf("marshal param error: %v", err)
+		return nil, fmt.Errorf("marshal param error: %w", err)
 	}
 
 	data := url.Values{}
 	data.Set("param", string(paramJSON))
 	data.Set("customercode", customerCode)
 
-	req, err := http.NewRequest("POST", APIURL, strings.NewReader(data.Encode()))
+	bodyBytes, err := c.postForm(APIURL, data)
 	if err != nil {
-		return nil, fmt.Errorf("create request error: %v", err)
-	}
-
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request error: %v", err)
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read body error: %v", err)
+		return nil, err
 	}
 
 	var wxResp Response
 	if err := json.Unmarshal(bodyBytes, &wxResp); err != nil {
-		return nil, fmt.Errorf("unmarshal response error: %v", err)
+		return nil, fmt.Errorf("unmarshal response error: %w", err)
 	}
-
 	if wxResp.Code != 0 {
-		return nil, fmt.Errorf("api error: %s", wxResp.Message)
+		return nil, apiErrorf("%s", wxResp.Message)
 	}
 
 	var bodyData Body
 	if err := json.Unmarshal([]byte(wxResp.Body), &bodyData); err != nil {
-		return nil, fmt.Errorf("unmarshal inner body error: %v", err)
+		return nil, fmt.Errorf("unmarshal inner body error: %w", err)
 	}
-
 	return &bodyData, nil
 }
 
@@ -128,7 +156,7 @@ func (c *Client) GetBalance(account, customerCode string) ([]RoomInfo, error) {
 		return nil, err
 	}
 
-	var rooms []RoomInfo
+	rooms := make([]RoomInfo, 0, len(bodyData.DetailList))
 	for _, detail := range bodyData.DetailList {
 		balance, _ := strconv.ParseFloat(detail.Odd, 64)
 		rooms = append(rooms, RoomInfo{
@@ -137,7 +165,6 @@ func (c *Client) GetBalance(account, customerCode string) ([]RoomInfo, error) {
 			Balance:    balance,
 		})
 	}
-
 	return rooms, nil
 }
 
@@ -156,47 +183,33 @@ type AuthUserData struct {
 
 // GetStudentInfo queries the student's real name and school name without login
 func (c *Client) GetStudentInfo(account, customerCode string) (string, string, error) {
-	bizContent := map[string]string{
+	bizJSON, _ := json.Marshal(map[string]string{
 		"token":      "",
 		"idserial":   account,
 		"schoolcode": customerCode,
-	}
-	bizJSON, _ := json.Marshal(bizContent)
-
-	payload := map[string]interface{}{
+	})
+	reqBody, _ := json.Marshal(map[string]interface{}{
 		"timestamp":  time.Now().Format("2006-01-02 15:04:05"),
 		"method":     "smallProgramUserAuth",
 		"bizcontent": string(bizJSON),
 		"sourceId":   2,
-	}
-	reqBody, _ := json.Marshal(payload)
+	})
 
-	req, err := http.NewRequest("POST", TradeURL, strings.NewReader(string(reqBody)))
-	if err != nil {
-		return "", "", err
-	}
-	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return "", "", err
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := c.post(TradeURL, "application/json;charset=UTF-8", string(reqBody))
 	if err != nil {
 		return "", "", err
 	}
 
 	var authResp AuthResponse
 	if err := json.Unmarshal(bodyBytes, &authResp); err != nil {
-		return "", "", err
+		return "", "", fmt.Errorf("unmarshal auth response error: %w", err)
 	}
-
 	if authResp.ReturnCode != "SUCCESS" {
-		return "", "", fmt.Errorf("user auth failed: %s", authResp.ReturnMsg)
+		return "", "", apiErrorf("学生信息校验失败: %s (请确认绑定的学号是否正确)", authResp.ReturnMsg)
 	}
-
+	if authResp.BusinessData.Username == "" {
+		return "", "", apiErrorf("未查询到学生姓名 (请确认绑定的学号是否正确)")
+	}
 	return authResp.BusinessData.Username, authResp.BusinessData.OrgName, nil
 }
 
@@ -219,41 +232,49 @@ type GoPayData struct {
 	Sign     string `json:"sign"`
 }
 
-// SupportedSchoolCode defines the whitelisted school codes for recharge
-const SupportedSchoolCode = "1399"
+// RechargeRequest describes a recharge. RoomVerify/RoomName and RealName/SchoolName
+// are optional caches; missing values are fetched from the API.
+type RechargeRequest struct {
+	Account      string
+	CustomerCode string
+	RoomVerify   string
+	RoomName     string
+	RealName     string
+	SchoolName   string
+	AmountYuan   float64
+}
 
 // GetRechargeURL calls goPay to generate the /paygateway/YunPayServie/redirectToPayFeeH5 payment URL
-func (c *Client) GetRechargeURL(account, customerCode, roomVerify, roomFull string, amountYuan float64) (string, error) {
-	if customerCode != SupportedSchoolCode {
-		return "", fmt.Errorf("当前充值功能仅支持学校代码为 %s 的院校", SupportedSchoolCode)
+func (c *Client) GetRechargeURL(r RechargeRequest) (string, error) {
+	if r.CustomerCode != SupportedSchoolCode {
+		return "", apiErrorf("当前充值功能仅支持学校代码为 %s 的院校", SupportedSchoolCode)
+	}
+
+	payamtCents := int(math.Round(r.AmountYuan * 100))
+	if payamtCents <= 0 {
+		return "", apiErrorf("充值金额必须大于0")
 	}
 
 	// 1. Ensure room info
-	if roomVerify == "" || roomFull == "" {
-		details, err := c.GetRoomDetails(account, customerCode)
+	if r.RoomVerify == "" || r.RoomName == "" {
+		details, err := c.GetRoomDetails(r.Account, r.CustomerCode)
 		if err != nil {
-			return "", fmt.Errorf("获取房间信息失败: %v", err)
+			return "", err
 		}
-		roomVerify = details.RoomVerify
-		roomFull = details.RoomFull
+		r.RoomVerify = details.RoomVerify
+		r.RoomName = details.RoomFull
+	}
+	if r.RoomVerify == "" {
+		return "", apiErrorf("未获取到有效的房间验证号(roomverify)")
 	}
 
-	if roomVerify == "" {
-		return "", fmt.Errorf("未获取到有效的房间验证号(roomverify)")
-	}
-
-	payamtCents := int(math.Round(amountYuan * 100))
-	if payamtCents <= 0 {
-		return "", fmt.Errorf("充值金额必须大于0")
-	}
-
-	// 2. Query student real name & school name (critical for gateway validation!)
-	realName, schoolName, err := c.GetStudentInfo(account, customerCode)
-	if err != nil || realName == "" {
-		if err == nil {
-			err = fmt.Errorf("未查询到学生姓名")
+	// 2. Student real name & school name (critical for gateway validation!)
+	if r.RealName == "" {
+		realName, schoolName, err := c.GetStudentInfo(r.Account, r.CustomerCode)
+		if err != nil {
+			return "", err
 		}
-		return "", fmt.Errorf("学生信息校验失败: %v (请确认绑定的学号是否正确)", err)
+		r.RealName, r.SchoolName = realName, schoolName
 	}
 
 	// 3. For login-free H5 page, token MUST remain empty ("")!
@@ -261,28 +282,27 @@ func (c *Client) GetRechargeURL(account, customerCode, roomVerify, roomFull stri
 	token := ""
 	journo := fmt.Sprintf("T002%s%s", time.Now().Format("20060102150405"), uuid.New().String()[:6])
 
-	customJSONMap := map[string]string{
-		"idserial": account,
-		"username": url.QueryEscape(realName),
+	customJSONBytes, _ := json.Marshal(map[string]string{
+		"idserial": r.Account,
+		"username": url.QueryEscape(r.RealName),
 		"wxToken":  "",
-	}
-	customJSONBytes, _ := json.Marshal(customJSONMap)
+	})
 
 	payload := map[string]interface{}{
 		"cmd":           "getPayInfo",
 		"thirdsource":   "T002",
 		"token":         token,
 		"wxToken":       token,
-		"idserial":      account,
-		"username":      url.QueryEscape(realName),
+		"idserial":      r.Account,
+		"username":      url.QueryEscape(r.RealName),
 		"txcode":        "51101", // 电费
 		"acccode":       "51101",
 		"payamt":        strconv.Itoa(payamtCents),
-		"schoolcode":    customerCode,
-		"customerName":  url.QueryEscape(schoolName),
+		"schoolcode":    r.CustomerCode,
+		"customerName":  url.QueryEscape(r.SchoolName),
 		"returnurl":     "https://xqh5.17wanxiao.com/userwaterelecmini/index.html#/pages/index/index",
-		"payaccnum":     roomVerify,
-		"payaccname":    url.QueryEscape(roomFull),
+		"payaccnum":     r.RoomVerify,
+		"payaccname":    url.QueryEscape(r.RoomName),
 		"summary":       "",
 		"extendinfo":    "",
 		"paychannel":    "13",
@@ -290,63 +310,46 @@ func (c *Client) GetRechargeURL(account, customerCode, roomVerify, roomFull stri
 		"roomLimitAmt":  nil,
 		"checkIdentity": "1",
 		"flag":          "cassso_zhkjxysdZ",
-		"customizedPay": customerCode,
+		"customizedPay": r.CustomerCode,
 		"customJson":    string(customJSONBytes),
 	}
 
 	paramJSON, err := json.Marshal(payload)
 	if err != nil {
-		return "", fmt.Errorf("序列化支付参数失败: %v", err)
+		return "", fmt.Errorf("marshal pay param error: %w", err)
 	}
 
 	formData := url.Values{}
 	formData.Set("param", string(paramJSON))
-	formData.Set("customercode", customerCode)
+	formData.Set("customercode", r.CustomerCode)
 	formData.Set("method", "getPayInfo")
 	formData.Set("command", "JBSWaterElecService")
 
-	req, err := http.NewRequest("POST", GoPayURL, strings.NewReader(formData.Encode()))
+	bodyBytes, err := c.postForm(GoPayURL, formData)
 	if err != nil {
-		return "", fmt.Errorf("创建请求失败: %v", err)
-	}
-
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("请求 goPay 接口失败: %v", err)
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("读取 goPay 响应失败: %v", err)
+		return "", fmt.Errorf("goPay %w", err)
 	}
 
 	var goResp GoPayResponse
 	if err := json.Unmarshal(bodyBytes, &goResp); err != nil {
-		return "", fmt.Errorf("解析 goPay 响应失败: %v", err)
+		return "", fmt.Errorf("unmarshal goPay response error: %w", err)
 	}
-
 	if goResp.Code != 0 || goResp.Body == "" {
-		return "", fmt.Errorf("goPay 返回错误: %s", goResp.Message)
+		return "", apiErrorf("支付网关返回错误: %s", goResp.Message)
 	}
 
 	var goBody GoPayBody
 	if err := json.Unmarshal([]byte(goResp.Body), &goBody); err != nil {
-		return "", fmt.Errorf("解析 goPay 内部数据失败: %v", err)
+		return "", fmt.Errorf("unmarshal goPay body error: %w", err)
 	}
-
 	if goBody.Result != 0 {
-		return "", fmt.Errorf("goPay 业务失败: %s", goBody.Message)
+		return "", apiErrorf("支付网关业务失败: %s", goBody.Message)
 	}
 
 	data := goBody.Data
 	if data.URL == "" || data.JsonData == "" || data.Sign == "" {
-		return "", fmt.Errorf("goPay 返回的支付数据不完整")
+		return "", apiErrorf("支付网关返回的支付数据不完整")
 	}
 
-	rechargeURL := fmt.Sprintf("%s?jsonData=%s&sign=%s", data.URL, url.QueryEscape(data.JsonData), url.QueryEscape(data.Sign))
-	return rechargeURL, nil
+	return fmt.Sprintf("%s?jsonData=%s&sign=%s", data.URL, url.QueryEscape(data.JsonData), url.QueryEscape(data.Sign)), nil
 }
