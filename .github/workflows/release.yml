@@ -11,6 +11,11 @@ on:
         description: 'Release notes'
         required: false
         default: 'Manual release build'
+      prerelease:
+        description: 'Mark as pre-release'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
@@ -43,10 +48,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag }}
+          target_commitish: ${{ github.sha }}
           name: Release ${{ inputs.tag }}
           body: ${{ inputs.body }}
           draft: false
-          prerelease: false
+          prerelease: ${{ inputs.prerelease }}
           files: |
             wanxiao-bot-linux-amd64
             wanxiao-bot-windows-amd64.exe
