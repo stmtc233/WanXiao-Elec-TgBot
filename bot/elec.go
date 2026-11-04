@@ -15,8 +15,9 @@ import (
 )
 
 type balanceResult struct {
-	rooms []wanxiao.RoomInfo
-	err   error
+	rooms      []wanxiao.RoomInfo
+	err        error
+	observedAt time.Time
 }
 
 // queryBindings fetches balances for all bindings concurrently (bounded).
@@ -35,7 +36,7 @@ func (bot *Bot) queryBindings(bindings []model.Binding) []balanceResult {
 			if err == nil && len(rooms) == 0 {
 				err = &wanxiao.APIError{Msg: "未查询到房间信息"}
 			}
-			results[i] = balanceResult{rooms: rooms, err: err}
+			results[i] = balanceResult{rooms: rooms, err: err, observedAt: time.Now().UTC()}
 		}(i)
 	}
 	wg.Wait()
@@ -123,7 +124,11 @@ func (bot *Bot) renderElec(userID int64, bindings []model.Binding) (string, *tel
 			}
 			sb.WriteString("\n")
 		}
-		bot.saveBalance(b, res.rooms[0], nil)
+		if err := bot.saveBalance(b, res.rooms[0], nil, res.observedAt, "manual"); err != nil {
+			sb.WriteString("⚠️ 本次历史记录保存失败，请稍后重试。\n")
+		}
+		rows = append(rows, telebot.Row{{Text: fmt.Sprintf("📊 统计 %s", roomDisplay(b)),
+			Unique: btnStatsEndpoint.Unique, Data: fmt.Sprintf("%d:24h:summary", b.ID)}})
 
 		if b.CustomerCode == wanxiao.SupportedSchoolCode {
 			rows = append(rows, telebot.Row{{

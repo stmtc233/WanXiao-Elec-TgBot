@@ -11,7 +11,9 @@ const helpText = "<b>完美校园电费助手</b>\n\n" +
 	"🔌 <b>查询电量</b>：查询所有绑定宿舍的剩余电量\n" +
 	"⚡ <b>充值电费</b>：生成电费充值链接（目前仅支持珠海科技学院）\n" +
 	"👤 <b>账号管理</b>：添加或解绑完美校园账号\n" +
-	"⚙️ <b>预警设置</b>：设置低电量提醒的阈值和检查间隔\n\n" +
+	"⚙️ <b>预警设置</b>：设置低电量提醒的阈值和开关\n\n" +
+	"📊 <b>用电统计</b>：每小时估算耗电、小时热力图、时段分析与 CSV 导出\n" +
+	"所有账号在每小时 00、30 分自动检查；关闭预警仍会采集历史。\n\n" +
 	"添加账号时可直接发送「学号 学校代码」或「学号 学校名称」，例如 <code>2023123456 1399</code>、<code>2023123456 郑州大学</code>；输入学校名称关键字即可搜索学校。\n" +
 	"任何输入步骤中都可以发送 /cancel 取消。"
 
@@ -60,10 +62,10 @@ func (bot *Bot) handleText(c telebot.Context) error {
 		return bot.onSchoolCodeInput(c, text)
 	case StateSettings_WaitThreshold:
 		return bot.onThresholdInput(c, text)
-	case StateSettings_WaitInterval:
-		return bot.onIntervalInput(c, text)
 	case StateRecharge_WaitAmount:
 		return bot.onRechargeAmountInput(c, text)
+	case StateStats_WaitDate:
+		return bot.onStatsDateInput(c, text)
 	}
 
 	if strings.HasPrefix(text, "/") {

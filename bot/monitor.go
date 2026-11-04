@@ -16,35 +16,12 @@ import (
 const (
 	// remindAfter is how long to wait before reminding again while the balance stays low.
 	remindAfter = 24 * time.Hour
-	// maxBackoffShift caps the failure backoff at interval * 2^maxBackoffShift.
-	maxBackoffShift = 3
-	// maxBackoffWait caps the failure backoff in absolute time.
-	maxBackoffWait = 6 * time.Hour
 )
 
-// monitorTarget is a binding due for a check together with its owner's settings.
+// monitorTarget is a binding together with its owner's notification settings.
 type monitorTarget struct {
 	user    *model.User
 	binding model.Binding
-}
-
-// isDue reports whether a binding should be checked now, backing off on repeated failures.
-func isDue(b *model.Binding, intervalMinutes int, now time.Time) bool {
-	wait := time.Duration(effectiveInterval(intervalMinutes)) * time.Minute
-	if b.FailCount > 0 {
-		shift := b.FailCount
-		if shift > maxBackoffShift {
-			shift = maxBackoffShift
-		}
-		backoff := wait << shift
-		if backoff > maxBackoffWait {
-			backoff = maxBackoffWait
-		}
-		if backoff > wait {
-			wait = backoff
-		}
-	}
-	return now.Sub(b.LastAttempt) >= wait
 }
 
 // CheckLowBalance is called by cron scheduler
@@ -52,21 +29,17 @@ func (bot *Bot) CheckLowBalance() {
 	bot.cleanupSessions()
 
 	var users []model.User
-	if err := bot.DB.Where("notify_enabled = ?", true).Preload("Bindings").Find(&users).Error; err != nil {
+	if err := bot.DB.Preload("Bindings").Find(&users).Error; err != nil {
 		log.Printf("[Monitor] load users failed: %v", err)
 		return
 	}
 
-	// Group due bindings by (account, code) so each room is queried once per run.
-	now := time.Now()
+	// Group all bindings by (account, code) so each room is queried once per run.
 	groups := make(map[string][]monitorTarget)
 	var keys []string
 	for i := range users {
 		user := &users[i]
 		for _, b := range user.Bindings {
-			if !isDue(&b, user.CheckInterval, now) {
-				continue
-			}
 			key := b.Account + "\x00" + b.CustomerCode
 			if _, ok := groups[key]; !ok {
 				keys = append(keys, key)
@@ -93,15 +66,16 @@ func (bot *Bot) CheckLowBalance() {
 			if err == nil && len(rooms) == 0 {
 				err = &wanxiao.APIError{Msg: "未查询到房间信息"}
 			}
+			observedAt := time.Now().UTC()
 			for _, t := range targets {
-				bot.handleCheckResult(t, rooms, err)
+				bot.handleCheckResult(t, rooms, err, observedAt)
 			}
 		}()
 	}
 	wg.Wait()
 }
 
-func (bot *Bot) handleCheckResult(t monitorTarget, rooms []wanxiao.RoomInfo, err error) {
+func (bot *Bot) handleCheckResult(t monitorTarget, rooms []wanxiao.RoomInfo, err error, observedAt time.Time) {
 	b := &t.binding
 	now := time.Now()
 
@@ -124,6 +98,8 @@ func (bot *Bot) handleCheckResult(t monitorTarget, rooms []wanxiao.RoomInfo, err
 
 	low := room.Balance < t.user.NotifyThreshold
 	switch {
+	case !t.user.NotifyEnabled:
+		// Sampling is independent of the notification switch.
 	case low && (b.AlertedAt == nil || now.Sub(*b.AlertedAt) >= remindAfter):
 		if bot.sendAlert(t.user, b, room) {
 			extra["alerted_at"] = now
@@ -132,7 +108,7 @@ func (bot *Bot) handleCheckResult(t monitorTarget, rooms []wanxiao.RoomInfo, err
 		extra["alerted_at"] = nil
 	}
 
-	bot.saveBalance(b, room, extra)
+	_ = bot.saveBalance(b, room, extra, observedAt, "monitor")
 }
 
 // sendAlert pushes a low balance notice. It returns true if the message was delivered.

@@ -67,7 +67,7 @@ func (bot *Bot) handleUnbindCallback(c telebot.Context) error {
 	}
 	respond(c)
 
-	msg := fmt.Sprintf("⚠️ 确定要解绑 <b>%s</b>（<code>%s</code>）吗？\n解绑后将不再查询和预警该房间。",
+	msg := fmt.Sprintf("⚠️ 确定要解绑 <b>%s</b>（<code>%s</code>）吗？\n解绑后将停止采集和预警，并删除该账号的历史记录。需要保留时请先到「用电统计」导出 CSV。",
 		esc(roomDisplay(b)), esc(b.Account))
 	markup := inlineMarkup(telebot.Row{
 		{Text: "✅ 确认解绑", Unique: btnUnbindOkEndpoint.Unique, Data: strconv.Itoa(int(b.ID))},
@@ -78,12 +78,26 @@ func (bot *Bot) handleUnbindCallback(c telebot.Context) error {
 
 func (bot *Bot) handleUnbindConfirmCallback(c telebot.Context) error {
 	userID := c.Sender().ID
-	res := bot.DB.Where("id = ? AND user_id = ?", strings.TrimSpace(c.Callback().Data), userID).Delete(&model.Binding{})
+	var deleted int64
+	err := bot.DB.Transaction(func(tx *gorm.DB) error {
+		var b model.Binding
+		if err := tx.Where("id = ? AND user_id = ?", strings.TrimSpace(c.Callback().Data), userID).First(&b).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("binding_id = ?", b.ID).Delete(&model.BalanceSample{}).Error; err != nil {
+			return err
+		}
+		res := tx.Delete(&b)
+		deleted = res.RowsAffected
+		return res.Error
+	})
 	switch {
-	case res.Error != nil:
-		log.Printf("[Accounts] unbind failed for user=%d: %v", userID, res.Error)
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		respond(c, "该账号不存在或已解绑")
+	case err != nil:
+		log.Printf("[Accounts] unbind failed for user=%d: %v", userID, err)
 		respond(c, "解绑失败，请稍后再试")
-	case res.RowsAffected == 0:
+	case deleted == 0:
 		respond(c, "该账号不存在或已解绑")
 	default:
 		log.Printf("[Accounts] user=%d unbound binding=%s", userID, c.Callback().Data)
@@ -248,11 +262,19 @@ func (bot *Bot) bindAccount(c telebot.Context, account, code string) error {
 		CustomerCode: code,
 		RoomName:     room.RoomName,
 		RoomVerify:   room.RoomVerify,
+		MeterType:    room.MeterType,
 		LastBalance:  room.Balance,
 		LastCheck:    now,
 		LastAttempt:  now,
 	}
-	if err := bot.DB.Create(&binding).Error; err != nil {
+	if err := bot.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&binding).Error; err != nil {
+			return err
+		}
+		return tx.Create(&model.BalanceSample{BindingID: binding.ID, ObservedAt: now.UTC(),
+			MeterKey: model.MeterKey(room.RoomVerify, room.RoomName, room.MeterType),
+			RoomName: room.RoomName, Balance: room.Balance, Source: "binding"}).Error
+	}); err != nil {
 		if errors.Is(err, gorm.ErrDuplicatedKey) {
 			return bot.edit(waitMsg, "⚠️ 该账号已绑定，无需重复添加。")
 		}

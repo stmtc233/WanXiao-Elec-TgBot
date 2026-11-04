@@ -36,6 +36,9 @@ jobs:
       - name: Get dependencies
         run: go mod download
 
+      - name: Test
+        run: go test ./...
+
       - name: Build Linux amd64
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o wanxiao-bot-linux-amd64 .
@@ -56,3 +59,4 @@ jobs:
           files: |
             wanxiao-bot-linux-amd64
             wanxiao-bot-windows-amd64.exe
+            charts/fonts/OFL.txt

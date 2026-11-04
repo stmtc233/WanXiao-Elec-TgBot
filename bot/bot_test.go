@@ -6,38 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"wanxiao-elec-bot/model"
 	"wanxiao-elec-bot/wanxiao"
 )
-
-func TestIsDue(t *testing.T) {
-	now := time.Now()
-	cases := []struct {
-		name     string
-		ago      time.Duration
-		fails    int
-		interval int
-		want     bool
-	}{
-		{"never checked", 0, 0, 60, true},
-		{"not yet", 30 * time.Minute, 0, 60, false},
-		{"due", 61 * time.Minute, 0, 60, true},
-		{"legacy 1 minute interval is clamped", 5 * time.Minute, 0, 1, false},
-		{"one failure doubles wait", 90 * time.Minute, 1, 60, false},
-		{"one failure after backoff", 121 * time.Minute, 1, 60, true},
-		{"backoff capped at 6h", 6*time.Hour + time.Minute, 10, 120, true},
-		{"cap never shortens interval", 7 * time.Hour, 2, 1440, false},
-	}
-	for _, tc := range cases {
-		b := &model.Binding{FailCount: tc.fails}
-		if tc.ago > 0 {
-			b.LastAttempt = now.Add(-tc.ago)
-		}
-		if got := isDue(b, tc.interval, now); got != tc.want {
-			t.Errorf("%s: isDue = %v, want %v", tc.name, got, tc.want)
-		}
-	}
-}
 
 func TestParseAmount(t *testing.T) {
 	ok := map[string]float64{"15": 15, " 50元 ": 50, "12.5": 12.5, "1": 1, "500": 500, "0.5e1": 5}
@@ -53,7 +23,7 @@ func TestParseAmount(t *testing.T) {
 	}
 }
 
-func TestParseThresholdInterval(t *testing.T) {
+func TestParseThreshold(t *testing.T) {
 	if v, ok := parseThreshold("12.345度"); !ok || v != 12.35 {
 		t.Errorf("parseThreshold = %v,%v", v, ok)
 	}
@@ -62,14 +32,7 @@ func TestParseThresholdInterval(t *testing.T) {
 			t.Errorf("parseThreshold(%q) should be invalid", in)
 		}
 	}
-	if v, ok := parseInterval("60分钟"); !ok || v != 60 {
-		t.Errorf("parseInterval = %v,%v", v, ok)
-	}
-	for _, in := range []string{"1", "9", "1441", "1.5"} {
-		if _, ok := parseInterval(in); ok {
-			t.Errorf("parseInterval(%q) should be invalid", in)
-		}
-	}
+
 }
 
 func TestFormatNum(t *testing.T) {
@@ -107,7 +70,7 @@ func TestSessions(t *testing.T) {
 		t.Fatal("expired session should be ignored")
 	}
 
-	bot.setState(2, StateSettings_WaitInterval)
+	bot.setState(2, StateStats_WaitDate)
 	bot.sessions[2].expires = time.Now().Add(-time.Second)
 	bot.setState(3, StateSettings_WaitThreshold)
 	bot.cleanupSessions()
