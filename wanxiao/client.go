@@ -112,6 +112,7 @@ type Detail struct {
 type RoomInfo struct {
 	RoomName   string
 	RoomVerify string
+	MeterType  string
 	Balance    float64
 }
 
@@ -158,10 +159,14 @@ func (c *Client) GetBalance(account, customerCode string) ([]RoomInfo, error) {
 
 	rooms := make([]RoomInfo, 0, len(bodyData.DetailList))
 	for _, detail := range bodyData.DetailList {
-		balance, _ := strconv.ParseFloat(detail.Odd, 64)
+		balance, err := strconv.ParseFloat(strings.TrimSpace(detail.Odd), 64)
+		if err != nil || math.IsNaN(balance) || math.IsInf(balance, 0) {
+			return nil, apiErrorf("完美校园返回的余额无效，请稍后再试")
+		}
 		rooms = append(rooms, RoomInfo{
 			RoomName:   bodyData.RoomFull,
 			RoomVerify: bodyData.RoomVerify,
+			MeterType:  detail.BusinessType,
 			Balance:    balance,
 		})
 	}

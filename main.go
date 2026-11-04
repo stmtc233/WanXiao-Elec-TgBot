@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -52,16 +53,16 @@ func openDB() (*gorm.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	// Remove duplicate bindings left by older versions before adding the unique index.
-	if db.Migrator().HasTable(&model.Binding{}) {
-		if err := db.Exec(`DELETE FROM bindings WHERE id NOT IN (
-			SELECT MIN(id) FROM bindings GROUP BY user_id, account, customer_code)`).Error; err != nil {
-			return nil, err
-		}
+	// Serialize SQLite transactions: a read-then-write transaction cannot be
+	// upgraded concurrently under WAL, even with busy_timeout configured.
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, err
 	}
+	sqlDB.SetMaxOpenConns(1)
 
-	if err := db.AutoMigrate(&model.User{}, &model.Binding{}); err != nil {
+	if err := model.Migrate(db); err != nil {
+		_ = sqlDB.Close()
 		return nil, err
 	}
 	return db, nil
@@ -83,10 +84,10 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Scheduler: check every minute (logic inside handles interval per user).
-	// SkipIfStillRunning prevents overlapping runs when a check takes longer than a minute.
-	c := cron.New(cron.WithChain(cron.SkipIfStillRunning(cron.DefaultLogger)))
-	if _, err := c.AddFunc("* * * * *", b.CheckLowBalance); err != nil {
+	// Every user shares the same wall-clock schedule, including failed checks.
+	// Collection continues when notifications are disabled.
+	c := cron.New(cron.WithLocation(time.UTC), cron.WithChain(cron.SkipIfStillRunning(cron.DefaultLogger)))
+	if _, err := c.AddFunc(fmt.Sprintf("*/%d * * * *", int(model.CheckInterval/time.Minute)), b.CheckLowBalance); err != nil {
 		log.Fatal(err)
 	}
 	c.Start()

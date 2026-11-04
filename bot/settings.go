@@ -14,7 +14,6 @@ import (
 
 var (
 	presetThresholds = []string{"5", "10", "20", "30"}
-	presetIntervals  = []string{"30", "60", "120", "360"}
 )
 
 // ⚙️ Settings
@@ -39,26 +38,15 @@ func (bot *Bot) renderSettings(c telebot.Context) error {
 	msg := fmt.Sprintf("⚙️ <b>预警设置</b>\n\n"+
 		"🔔 预警状态：%s\n"+
 		"📉 报警阈值：<code>%s</code> 度\n"+
-		"⏱️ 检查间隔：<code>%d</code> 分钟\n\n"+
-		"<i>余额低于阈值时推送一次提醒；若持续偏低，每 24 小时再提醒一次。</i>",
-		status, formatNum(user.NotifyThreshold), effectiveInterval(user.CheckInterval))
+		"⏱️ 自动检查：全局每 <code>%d</code> 分钟（不可修改）\n\n"+
+		"<i>关闭预警后仍会每 30 分钟采集历史。余额低于阈值时提醒；持续偏低每 24 小时再提醒一次。</i>",
+		status, formatNum(user.NotifyThreshold), int(model.CheckInterval.Minutes()))
 
 	markup := inlineMarkup(
 		telebot.Row{{Text: toggleText, Unique: btnToggleAlert.Unique}},
-		telebot.Row{btnSetThreshold, btnSetInterval},
+		telebot.Row{btnSetThreshold},
 	)
 	return editOrSend(c, msg, markup, telebot.ModeHTML)
-}
-
-// effectiveInterval clamps legacy/invalid stored intervals into the allowed range.
-func effectiveInterval(minutes int) int {
-	if minutes < MinInterval {
-		return MinInterval
-	}
-	if minutes > MaxInterval {
-		return MaxInterval
-	}
-	return minutes
 }
 
 func (bot *Bot) handleToggleAlert(c telebot.Context) error {
@@ -108,28 +96,12 @@ func (bot *Bot) handleSetThresholdBtn(c telebot.Context) error {
 	return editOrSend(c, msg, markup, telebot.ModeHTML)
 }
 
-func (bot *Bot) handleSetIntervalBtn(c telebot.Context) error {
-	respond(c)
-	bot.setState(c.Sender().ID, StateSettings_WaitInterval)
-	msg := fmt.Sprintf("⏱️ 请选择或输入新的 <b>检查间隔</b>（分钟，%d–%d）：\n发送 /cancel 取消。", MinInterval, MaxInterval)
-	markup := inlineMarkup(presetRow(btnIntervalValue.Unique, presetIntervals, " 分钟"), telebot.Row{btnBackSettings})
-	return editOrSend(c, msg, markup, telebot.ModeHTML)
-}
-
 func parseThreshold(s string) (float64, bool) {
 	v, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(s), "度")), 64)
 	if err != nil || math.IsNaN(v) || v <= MinThreshold || v > MaxThreshold {
 		return 0, false
 	}
 	return math.Round(v*100) / 100, true
-}
-
-func parseInterval(s string) (int, bool) {
-	v, err := strconv.Atoi(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(s), "分钟")))
-	if err != nil || v < MinInterval || v > MaxInterval {
-		return 0, false
-	}
-	return v, true
 }
 
 func (bot *Bot) updateThreshold(userID int64, v float64) error {
@@ -141,13 +113,6 @@ func (bot *Bot) updateThreshold(userID int64, v float64) error {
 	}
 	bot.resetAlerts(userID)
 	return nil
-}
-
-func (bot *Bot) updateInterval(userID int64, v int) error {
-	if _, err := bot.getOrCreateUser(userID); err != nil {
-		return err
-	}
-	return bot.DB.Model(&model.User{}).Where("id = ?", userID).Update("check_interval", v).Error
 }
 
 func (bot *Bot) handleThresholdValue(c telebot.Context) error {
@@ -166,22 +131,6 @@ func (bot *Bot) handleThresholdValue(c telebot.Context) error {
 	return bot.renderSettings(c)
 }
 
-func (bot *Bot) handleIntervalValue(c telebot.Context) error {
-	v, ok := parseInterval(c.Callback().Data)
-	if !ok {
-		respond(c, "无效的间隔")
-		return nil
-	}
-	if err := bot.updateInterval(c.Sender().ID, v); err != nil {
-		log.Printf("[Settings] update interval failed: %v", err)
-		respond(c, "设置失败，请稍后再试")
-		return nil
-	}
-	bot.clearState(c.Sender().ID)
-	respond(c, "检查间隔已更新")
-	return bot.renderSettings(c)
-}
-
 func (bot *Bot) onThresholdInput(c telebot.Context, text string) error {
 	v, ok := parseThreshold(text)
 	if !ok {
@@ -194,19 +143,5 @@ func (bot *Bot) onThresholdInput(c telebot.Context, text string) error {
 	}
 	bot.clearState(c.Sender().ID)
 	_ = c.Send(fmt.Sprintf("✅ 报警阈值已更新为 %s 度。", formatNum(v)))
-	return bot.renderSettings(c)
-}
-
-func (bot *Bot) onIntervalInput(c telebot.Context, text string) error {
-	v, ok := parseInterval(text)
-	if !ok {
-		return c.Send(fmt.Sprintf("❌ 输入无效，请输入 %d–%d 之间的整数，或发送 /cancel 取消。", MinInterval, MaxInterval))
-	}
-	if err := bot.updateInterval(c.Sender().ID, v); err != nil {
-		log.Printf("[Settings] update interval failed: %v", err)
-		return c.Send("❌ 设置失败，请稍后再试。")
-	}
-	bot.clearState(c.Sender().ID)
-	_ = c.Send(fmt.Sprintf("✅ 检查间隔已更新为 %d 分钟。", v))
 	return bot.renderSettings(c)
 }

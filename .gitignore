@@ -1,5 +1,7 @@
 config.json
 wanxiao.db
+wanxiao.db-wal
+wanxiao.db-shm
 wanxiao-elec-bot.exe
 .vscode/launch.json
 __debug_bin.exe

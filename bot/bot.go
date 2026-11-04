@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"wanxiao-elec-bot/history"
 	"wanxiao-elec-bot/model"
 	"wanxiao-elec-bot/wanxiao"
 
@@ -19,8 +20,8 @@ const (
 	StateAddAccount_WaitAccount
 	StateAddAccount_WaitCode
 	StateSettings_WaitThreshold
-	StateSettings_WaitInterval
 	StateRecharge_WaitAmount
+	StateStats_WaitDate
 )
 
 const (
@@ -29,8 +30,6 @@ const (
 	// Limits for user input
 	MinThreshold   = 0.0
 	MaxThreshold   = 1000.0
-	MinInterval    = 10   // minutes
-	MaxInterval    = 1440 // minutes
 	MinRechargeAmt = 1.0
 	MaxRechargeAmt = 500.0
 
@@ -64,12 +63,12 @@ var (
 	menuBtnRecharge = telebot.Btn{Text: "⚡ 充值电费"}
 	menuBtnAccounts = telebot.Btn{Text: "👤 账号管理"}
 	menuBtnSettings = telebot.Btn{Text: "⚙️ 预警设置"}
+	menuBtnStats    = telebot.Btn{Text: "📊 用电统计"}
 	menuKeyboard    = &telebot.ReplyMarkup{ResizeKeyboard: true}
 
 	// Static inline buttons
 	btnAddAccount   = telebot.Btn{Text: "➕ 添加账号", Unique: "add_acc"}
 	btnSetThreshold = telebot.Btn{Text: "📉 修改阈值", Unique: "set_thres"}
-	btnSetInterval  = telebot.Btn{Text: "⏱️ 修改间隔", Unique: "set_inter"}
 	btnRefreshElec  = telebot.Btn{Text: "🔄 刷新", Unique: "refresh_elec"}
 	btnBackSettings = telebot.Btn{Text: "↩️ 返回", Unique: "settings_back"}
 	btnBackAccounts = telebot.Btn{Text: "↩️ 返回", Unique: "acc_back"}
@@ -78,7 +77,6 @@ var (
 	// Callback endpoints carrying data
 	btnToggleAlert       = telebot.Btn{Unique: "toggle_alert"}
 	btnThresholdValue    = telebot.Btn{Unique: "thres_val"}
-	btnIntervalValue     = telebot.Btn{Unique: "inter_val"}
 	btnSchoolEndpoint    = telebot.Btn{Unique: "school"}
 	btnPayAccEndpoint    = telebot.Btn{Unique: "pay_acc"} // sends a new amount menu (from query result / alerts)
 	btnPaySelEndpoint    = telebot.Btn{Unique: "pay_sel"} // edits the room selection into the amount menu
@@ -86,6 +84,9 @@ var (
 	btnAmtCustomEndpoint = telebot.Btn{Unique: "amt_custom"}
 	btnUnbindEndpoint    = telebot.Btn{Unique: "unbind"}
 	btnUnbindOkEndpoint  = telebot.Btn{Unique: "unbind_ok"}
+	btnStatsEndpoint     = telebot.Btn{Unique: "stats"}
+	btnStatsDate         = telebot.Btn{Unique: "stats_date"}
+	btnStatsBack         = telebot.Btn{Unique: "stats_back"}
 )
 
 var botCommands = []telebot.Command{
@@ -93,6 +94,7 @@ var botCommands = []telebot.Command{
 	{Text: "recharge", Description: "充值电费"},
 	{Text: "accounts", Description: "账号管理"},
 	{Text: "settings", Description: "预警设置"},
+	{Text: "stats", Description: "每小时用电统计与图表"},
 	{Text: "cancel", Description: "取消当前操作"},
 	{Text: "help", Description: "使用帮助"},
 }
@@ -125,6 +127,7 @@ func NewBot(token string, db *gorm.DB) (*Bot, error) {
 	menuKeyboard.Reply(
 		menuKeyboard.Row(menuBtnElec, menuBtnRecharge),
 		menuKeyboard.Row(menuBtnAccounts, menuBtnSettings),
+		menuKeyboard.Row(menuBtnStats),
 	)
 
 	if err := b.SetCommands(botCommands); err != nil {
@@ -153,12 +156,14 @@ func (bot *Bot) registerHandlers() {
 	bot.B.Handle("/pay", bot.handleRecharge)
 	bot.B.Handle("/accounts", bot.handleAccounts)
 	bot.B.Handle("/settings", bot.handleSettings)
+	bot.B.Handle("/stats", bot.handleStats)
 
 	// Menu Buttons
 	bot.B.Handle(&menuBtnElec, bot.handleElec)
 	bot.B.Handle(&menuBtnRecharge, bot.handleRecharge)
 	bot.B.Handle(&menuBtnAccounts, bot.handleAccounts)
 	bot.B.Handle(&menuBtnSettings, bot.handleSettings)
+	bot.B.Handle(&menuBtnStats, bot.handleStats)
 
 	// Inline buttons
 	for btn, h := range bot.callbackHandlers() {
@@ -181,9 +186,7 @@ func (bot *Bot) callbackHandlers() map[string]telebot.HandlerFunc {
 		btnUnbindOkEndpoint.Unique:  bot.handleUnbindConfirmCallback,
 		btnToggleAlert.Unique:       bot.handleToggleAlert,
 		btnSetThreshold.Unique:      bot.handleSetThresholdBtn,
-		btnSetInterval.Unique:       bot.handleSetIntervalBtn,
 		btnThresholdValue.Unique:    bot.handleThresholdValue,
-		btnIntervalValue.Unique:     bot.handleIntervalValue,
 		btnBackSettings.Unique:      bot.handleSettings,
 		btnRefreshElec.Unique:       bot.handleRefreshElec,
 		btnPayAccEndpoint.Unique:    bot.handlePayAccCallback,
@@ -191,6 +194,9 @@ func (bot *Bot) callbackHandlers() map[string]telebot.HandlerFunc {
 		btnAmtEndpoint.Unique:       bot.handleAmtCallback,
 		btnAmtCustomEndpoint.Unique: bot.handleAmtCustomCallback,
 		btnCancel.Unique:            bot.handleCancelCallback,
+		btnStatsEndpoint.Unique:     bot.handleStatsCallback,
+		btnStatsDate.Unique:         bot.handleStatsDate,
+		btnStatsBack.Unique:         bot.handleStats,
 	}
 }
 
@@ -331,20 +337,25 @@ func (bot *Bot) findBinding(userID int64, idStr string) (*model.Binding, error) 
 }
 
 // saveBalance updates the cached room info of a binding after a successful query.
-func (bot *Bot) saveBalance(b *model.Binding, room wanxiao.RoomInfo, extra map[string]interface{}) {
-	now := time.Now()
+func (bot *Bot) saveBalance(b *model.Binding, room wanxiao.RoomInfo, extra map[string]interface{}, observedAt time.Time, source string) error {
 	updates := map[string]interface{}{
 		"room_name":    room.RoomName,
 		"room_verify":  room.RoomVerify,
+		"meter_type":   room.MeterType,
 		"last_balance": room.Balance,
-		"last_check":   now,
+		"last_check":   observedAt.UTC(),
 	}
 	for k, v := range extra {
 		updates[k] = v
 	}
-	if err := bot.DB.Model(&model.Binding{}).Where("id = ?", b.ID).Updates(updates).Error; err != nil {
+	sample := model.BalanceSample{BindingID: b.ID, ObservedAt: observedAt,
+		MeterKey: model.MeterKey(room.RoomVerify, room.RoomName, room.MeterType),
+		RoomName: room.RoomName, Balance: room.Balance, Source: source}
+	if err := history.Save(bot.DB, sample, updates); err != nil {
 		log.Printf("[DB] update binding %d failed: %v", b.ID, err)
-		return
+		return err
 	}
-	b.RoomName, b.RoomVerify, b.LastBalance, b.LastCheck = room.RoomName, room.RoomVerify, room.Balance, now
+	b.RoomName, b.RoomVerify, b.LastBalance, b.LastCheck = room.RoomName, room.RoomVerify, room.Balance, observedAt
+	b.MeterType = room.MeterType
+	return nil
 }
