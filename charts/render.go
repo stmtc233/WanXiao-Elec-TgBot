@@ -51,13 +51,17 @@ type canvas struct {
 }
 
 func newCanvas(height int) (*canvas, error) {
+	return newCanvasSize(1240, height)
+}
+
+func newCanvasSize(width, height int) (*canvas, error) {
 	f, err := parsedFont()
 	if err != nil {
 		return nil, err
 	}
-	c := &canvas{img: image.NewRGBA(image.Rect(0, 0, 1240, height)), faces: make(map[int]font.Face), font: f}
-	c.rect(0, 0, 1240, height, background)
-	c.rect(24, 24, 1216, height-24, color.White)
+	c := &canvas{img: image.NewRGBA(image.Rect(0, 0, width, height)), faces: make(map[int]font.Face), font: f}
+	c.rect(0, 0, width, height, background)
+	c.rect(24, 24, width-24, height-24, color.White)
 	return c, nil
 }
 
@@ -136,6 +140,16 @@ func (c *canvas) footer(lines ...string) {
 
 // Render supports hours (up to 48), heatmap, profile, and balance.
 func Render(r history.Report, view, room string) ([]byte, error) {
+	if view == "balance" {
+		return renderBalance(r, room)
+	}
+	if view == "hours" {
+		if len(r.Hours) > 48 {
+			return nil, fmt.Errorf("逐小时图最多显示48小时，请选择日期或热力图")
+		}
+		hours := visibleHours(r)
+		return renderHourPage(r, hours, room, 1, 1)
+	}
 	height := 720
 	if view == "heatmap" {
 		height = 330 + len(days(r))*34
@@ -146,21 +160,12 @@ func Render(r history.Report, view, room string) ([]byte, error) {
 	}
 	defer c.close()
 	switch view {
-	case "hours":
-		if len(r.Hours) > 48 {
-			return nil, fmt.Errorf("逐小时图最多显示 48 小时，请选择日期或热力图")
-		}
-		c.header("每小时估算耗电", room, r)
-		c.hourly(r)
 	case "profile":
 		c.header("各时段平均耗电", room, r)
 		c.profile(r)
 	case "heatmap":
 		c.header("小时耗电热力图", room, r)
 		c.heatmap(r)
-	case "balance":
-		c.header("剩余电量趋势", room, r)
-		c.balance(r)
 	default:
 		return nil, fmt.Errorf("未知图表类型")
 	}
@@ -199,57 +204,6 @@ func scale(v float64) float64 {
 		return 1
 	}
 	return v * 1.2
-}
-
-func (c *canvas) hourly(r history.Report) {
-	var largest float64
-	for _, h := range r.Hours {
-		largest = math.Max(largest, h.Usage)
-	}
-	maximum := scale(largest)
-	x0, y0, x1, y1 := c.axes(maximum)
-	n := len(r.Hours)
-	if n == 0 {
-		return
-	}
-	step := float64(x1-x0) / float64(n)
-	for i, h := range r.Hours {
-		x, w := x0+int(float64(i)*step)+3, max(4, int(step)-6)
-		if h.Covered == 0 {
-			c.rect(x, y0, x+w, y1, missing)
-			label := "—"
-			if h.Gap {
-				label = "断采"
-			}
-			if h.Increase {
-				label = "上涨"
-			}
-			c.text(x+1, y1-10, 15, label, muted)
-			if h.Gap || h.Increase {
-				c.line(x, y1-2, x+w, y1-2, orange, 3)
-			}
-		} else {
-			col := teal
-			if !h.Complete() {
-				col = orange
-			}
-			y := y1 - int(h.Usage/maximum*float64(y1-y0))
-			c.rect(x, y, x+w, y1, col)
-			if h.Usage == 0 {
-				c.line(x, y1-2, x+w, y1-2, col, 3)
-			}
-			if n <= 24 {
-				c.text(x, y-8, 15, fmt.Sprintf("%.2f", h.Usage), ink)
-			}
-		}
-		if i%max(1, n/12) == 0 {
-			c.text(x, y1+28, 17, h.Start.Format("15"), muted)
-			if i == 0 || h.Start.Hour() < max(1, n/12) {
-				c.text(x-5, y1+53, 15, h.Start.Format("01-02"), muted)
-			}
-		}
-	}
-	c.footer("青色：完整小时   橙色：未满小时或数据不完整   灰色：无有效数据", "按余额下降估算；充值/调整和采样中断区间不计入耗电。")
 }
 
 func (c *canvas) profile(r history.Report) {
@@ -333,52 +287,4 @@ func (c *canvas) heatmap(r history.Report) {
 		}
 	}
 	c.footer(fmt.Sprintf("单位：度，每格对应一个小时   颜色越深耗电越多   色阶上限 %.2f 度", largest), "灰色：无有效数据   橙色下划线：不完整   数据基于余额下降估算。")
-}
-
-func (c *canvas) balance(r history.Report) {
-	var largest float64
-	var smallest float64
-	for _, s := range r.Samples {
-		largest = math.Max(largest, s.Balance)
-		smallest = math.Min(smallest, s.Balance)
-	}
-	maximum := scale(largest)
-	minimum := smallest * 1.2
-	x0, y0, x1, y1 := c.axesRange(minimum, maximum)
-	point := func(at time.Time, v float64) (int, int) {
-		return x0 + int(float64(at.Sub(r.Start))/float64(r.End.Sub(r.Start))*float64(x1-x0)), y1 - int((v-minimum)/(maximum-minimum)*float64(y1-y0))
-	}
-	for i, s := range r.Samples {
-		x, y := point(s.ObservedAt, s.Balance)
-		if i > 0 {
-			prev := r.Samples[i-1]
-			if s.ObservedAt.Sub(prev.ObservedAt) <= history.MaxSampleGap {
-				xp, yp := point(prev.ObservedAt, prev.Balance)
-				col := teal
-				if s.Balance > prev.Balance+1e-6 {
-					col = orange
-				}
-				c.line(xp, yp, x, y, col, 3)
-			}
-		}
-		c.rect(x-2, y-2, x+3, y+3, teal)
-	}
-	for _, inc := range r.Increases {
-		for _, s := range r.Samples {
-			if s.ObservedAt.Equal(inc.At) {
-				x, y := point(s.ObservedAt, s.Balance)
-				c.rect(x-5, y-5, x+6, y+6, orange)
-			}
-		}
-	}
-	for i := 0; i <= 6; i++ {
-		x := x0 + (x1-x0)*i/6
-		at := r.Start.Add(time.Duration(float64(r.End.Sub(r.Start)) * float64(i) / 6))
-		c.text(x-22, y1+28, 17, at.Format("15:04"), muted)
-		c.text(x-22, y1+52, 15, at.Format("01-02"), muted)
-	}
-	if len(r.Samples) == 0 {
-		c.text(450, (y0+y1)/2, 24, "该范围暂无余额记录", muted)
-	}
-	c.footer("橙色：余额上涨，疑似充值/调整；不代表实际充值金额。", "采样中断处不连线；横轴为采样时间。")
 }

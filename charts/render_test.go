@@ -44,7 +44,7 @@ func TestChartsRenderOfflineWithChineseFont(t *testing.T) {
 				t.Fatal(err)
 			}
 			img, err := png.Decode(bytes.NewReader(data))
-			if err != nil || img.Bounds().Dx() != 1240 || img.Bounds().Dy() < 500 {
+			if err != nil || img.Bounds().Dx() != expectedWidth(view) || img.Bounds().Dy() < 500 {
 				t.Fatal("invalid chart", err)
 			}
 			if dir := os.Getenv("WANXIAO_CHART_PREVIEW_DIR"); dir != "" {
@@ -80,4 +80,11 @@ func TestEmptyReportRendersAndLongHourlyRangeIsRejected(t *testing.T) {
 	if _, err := Render(r, "hours", "长范围"); err == nil {
 		t.Fatal("unreadable hourly range accepted")
 	}
+}
+
+func expectedWidth(view string) int {
+	if view == "hours" || view == "balance" {
+		return 900
+	}
+	return 1240
 }

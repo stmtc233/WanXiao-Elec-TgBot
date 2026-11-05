@@ -134,10 +134,18 @@ type statsContext struct {
 	sent     []interface{}
 }
 
-func (c *statsContext) Sender() *telebot.User                     { return &telebot.User{ID: c.userID} }
-func (c *statsContext) Callback() *telebot.Callback               { return &telebot.Callback{Data: c.data} }
-func (c *statsContext) Respond(r ...*telebot.CallbackResponse) error { if len(r)>0 { c.response = r[0].Text }; return nil }
-func (c *statsContext) EditOrSend(what interface{}, _ ...interface{}) error { c.sent=append(c.sent,what);return nil }
+func (c *statsContext) Sender() *telebot.User       { return &telebot.User{ID: c.userID} }
+func (c *statsContext) Callback() *telebot.Callback { return &telebot.Callback{Data: c.data} }
+func (c *statsContext) Respond(r ...*telebot.CallbackResponse) error {
+	if len(r) > 0 {
+		c.response = r[0].Text
+	}
+	return nil
+}
+func (c *statsContext) EditOrSend(what interface{}, _ ...interface{}) error {
+	c.sent = append(c.sent, what)
+	return nil
+}
 func (c *statsContext) Send(what interface{}, _ ...interface{}) error {
 	c.sent = append(c.sent, what)
 	return nil
@@ -172,24 +180,81 @@ func TestRemovedIntervalCallbacksAreNotRegistered(t *testing.T) {
 }
 
 func TestStatsDashboardChartExportAndUnbind(t *testing.T) {
-	db:=statsDB(t)
-	now:=time.Now().UTC()
-	b:=model.Binding{UserID:100,Account:"own",CustomerCode:"1399",RoomName:"测试宿舍",LastBalance:20,LastCheck:now}
-	if err:=db.Create(&b).Error;err!=nil { t.Fatal(err) }
-	for i:=0;i<5;i++ {
-		if err:=db.Create(&model.BalanceSample{BindingID:b.ID,ObservedAt:now.Add(time.Duration(i-4)*30*time.Minute),Balance:float64(24-i),MeterKey:"a",RoomName:"测试宿舍"}).Error;err!=nil { t.Fatal(err) }
+	db := statsDB(t)
+	now := time.Now().UTC()
+	b := model.Binding{UserID: 100, Account: "own", CustomerCode: "1399", RoomName: "测试宿舍", LastBalance: 20, LastCheck: now}
+	if err := db.Create(&b).Error; err != nil {
+		t.Fatal(err)
 	}
-	bot:=&Bot{DB:db,sessions:make(map[int64]*session)}
-	c:=&statsContext{userID:100,data:strconvID(b.ID)+":24h:summary"}
-	if err:=bot.handleStatsCallback(c);err!=nil { t.Fatal(err) }
-	if len(c.sent)!=2 { t.Fatal("expected text dashboard and chart",len(c.sent)) }
-	if _,ok:=c.sent[1].(*telebot.Photo);!ok { t.Fatal("dashboard did not include chart") }
-	c=&statsContext{userID:100,data:strconvID(b.ID)+":24h:csv"}
-	if err:=bot.handleStatsCallback(c);err!=nil { t.Fatal(err) }
-	if len(c.sent)!=2 { t.Fatal("expected raw and hourly documents") }
-	for _,sent:=range c.sent { doc,ok:=sent.(*telebot.Document);if !ok||!strings.HasSuffix(doc.FileName,".csv") { t.Fatal(sent) } }
-	c=&statsContext{userID:100,data:strconvID(b.ID)}
-	if err:=bot.handleUnbindConfirmCallback(c);err!=nil { t.Fatal(err) }
-	var count int64;db.Model(&model.BalanceSample{}).Where("binding_id = ?",b.ID).Count(&count)
-	if count!=0 { t.Fatal("unbinding left private history behind",count) }
+	for i := 0; i < 5; i++ {
+		if err := db.Create(&model.BalanceSample{BindingID: b.ID, ObservedAt: now.Add(time.Duration(i-4) * 30 * time.Minute), Balance: float64(24 - i), MeterKey: "a", RoomName: "测试宿舍"}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	bot := &Bot{DB: db, sessions: make(map[int64]*session)}
+	c := &statsContext{userID: 100, data: strconvID(b.ID) + ":24h:summary"}
+	if err := bot.handleStatsCallback(c); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.sent) != 2 {
+		t.Fatal("expected text dashboard and chart", len(c.sent))
+	}
+	if _, ok := c.sent[1].(*telebot.Photo); !ok {
+		t.Fatal("dashboard did not include chart")
+	}
+	c = &statsContext{userID: 100, data: strconvID(b.ID) + ":24h:csv"}
+	if err := bot.handleStatsCallback(c); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.sent) != 2 {
+		t.Fatal("expected raw and hourly documents")
+	}
+	for _, sent := range c.sent {
+		doc, ok := sent.(*telebot.Document)
+		if !ok || !strings.HasSuffix(doc.FileName, ".csv") {
+			t.Fatal(sent)
+		}
+	}
+	c = &statsContext{userID: 100, data: strconvID(b.ID)}
+	if err := bot.handleUnbindConfirmCallback(c); err != nil {
+		t.Fatal(err)
+	}
+	var count int64
+	db.Model(&model.BalanceSample{}).Where("binding_id = ?", b.ID).Count(&count)
+	if count != 0 {
+		t.Fatal("unbinding left private history behind", count)
+	}
+}
+
+func TestCoarseDashboardExplainsPrecisionAndPagesLongRecords(t *testing.T) {
+	db := statsDB(t)
+	end := time.Now().UTC().Truncate(time.Hour)
+	start := end.Add(-14 * time.Hour)
+	b := model.Binding{UserID: 100, Account: "coarse", CustomerCode: "1399", RoomName: "测试宿舍", LastBalance: 11, LastCheck: end}
+	if err := db.Create(&b).Error; err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i <= 28; i++ {
+		if err := db.Create(&model.BalanceSample{BindingID: b.ID, ObservedAt: start.Add(time.Duration(i) * 30 * time.Minute), Balance: 20 - float64(i/3), MeterKey: "a", RoomName: b.RoomName}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	bot := &Bot{DB: db, sessions: make(map[int64]*session)}
+	c := &statsContext{userID: 100, data: strconvID(b.ID) + ":24h:summary"}
+	if err := bot.handleStatsCallback(c); err != nil {
+		t.Fatal(err)
+	}
+	text, ok := c.sent[0].(string)
+	if !ok || !strings.Contains(text, "整度阶梯") || !strings.Contains(text, "整体平均") || strings.Contains(text, "记录下降最多") || strings.Contains(text, "☀️") {
+		t.Fatal("coarse observations were presented as precise hourly patterns", text)
+	}
+	if len(c.sent) < 3 {
+		t.Fatal("long records were squeezed into one image", len(c.sent))
+	}
+	for _, item := range c.sent[1:] {
+		photo, ok := item.(*telebot.Photo)
+		if !ok || !strings.Contains(photo.Caption, "不能精确定位") || !strings.Contains(photo.Caption, "张") {
+			t.Fatal(item)
+		}
+	}
 }

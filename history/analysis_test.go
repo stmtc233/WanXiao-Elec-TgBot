@@ -116,3 +116,56 @@ func TestProfileUsesCompleteHoursOnly(t *testing.T) {
 		t.Fatal(s)
 	}
 }
+
+func TestLegacyCachedTypeIsNotAFalseMeterChange(t *testing.T) {
+	a := sample("2026-11-01 00:40", 20)
+	a.Source = "cached"
+	a.MeterKey = "same-room\x1f"
+	b := sample("2026-11-01 01:26", 19)
+	b.MeterKey = "same-room\x1f0"
+	c := sample("2026-11-01 01:56", 18)
+	c.MeterKey = b.MeterKey
+	r := Analyze([]model.BalanceSample{a, b, c}, at("2026-11-01 00:00"), at("2026-11-01 02:00"))
+	if r.MeterChanged || len(r.Samples) != 3 || r.UnallocatedDrop != 1 || !r.Hours[0].Gap {
+		t.Fatal(r)
+	}
+	if r.RawSamples[0].MeterKey != a.MeterKey {
+		t.Fatal("normalization changed original export")
+	}
+	near(t, r.Summary().Usage, 1)
+}
+
+func TestCachedTypeNeverJoinsAmbiguousMeters(t *testing.T) {
+	a := sample("2026-11-01 00:00", 100)
+	a.Source = "cached"
+	a.MeterKey = "same-room\x1f"
+	b := sample("2026-11-01 00:30", 50)
+	b.MeterKey = "same-room\x1f0"
+	c := sample("2026-11-01 01:00", 4)
+	c.MeterKey = "same-room\x1f1"
+	normalized := resolveCachedMeterKeys([]model.BalanceSample{a, b, c})
+	if normalized[0].MeterKey != a.MeterKey {
+		t.Fatal("ambiguous cached type was invented")
+	}
+	r := Analyze([]model.BalanceSample{a, b, c}, a.ObservedAt, c.ObservedAt)
+	if !r.MeterChanged || r.Summary().Usage != 0 {
+		t.Fatal(r)
+	}
+}
+
+func TestWholeDegreeWarningRequiresRepeatedJumpsAndRejectsFineReadings(t *testing.T) {
+	var samples []model.BalanceSample
+	start := at("2026-11-01 00:00")
+	for i := 0; i < 13; i++ {
+		samples = append(samples, model.BalanceSample{ObservedAt: start.Add(time.Duration(i) * 30 * time.Minute), Balance: 20 - float64(i/3), MeterKey: "a"})
+	}
+	r := Analyze(samples, start, start.Add(6*time.Hour))
+	if !r.WholeDegreeSteps() {
+		t.Fatal("repeated integer steps not recognized")
+	}
+	samples[1].Balance -= 0.01
+	r = Analyze(samples, start, start.Add(6*time.Hour))
+	if r.WholeDegreeSteps() {
+		t.Fatal("fine readings were mislabelled as integer steps")
+	}
+}
