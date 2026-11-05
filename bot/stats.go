@@ -130,25 +130,35 @@ func (bot *Bot) showStats(c telebot.Context, b *model.Binding, period string) er
 			fmt.Fprintf(&out, "当前绑定房间：%s\n", esc(roomDisplay(b)))
 		}
 	}
-	fmt.Fprintf(&out, "⚡ 已记录估算耗电：<code>%.2f</code> 度\n🕘 完整小时：<code>%d / %d</code>\n", s.Usage, s.CompleteHours, len(r.Hours))
+	fmt.Fprintf(&out, "⚡ 有效区间累计下降：<code>%.2f</code> 度\n🕘 采样完整小时：<code>%d / %d</code>\n", s.Usage, s.CompleteHours, len(r.Hours))
+	if r.WholeDegreeSteps() {
+		out.WriteString("\n⚠️ 本段余额呈整度阶梯变化，无法精确判断真实用电发生在哪个小时。0仅表示余额未下降。\n\n")
+	}
+	if r.UnallocatedDrop > 0 {
+		fmt.Fprintf(&out, "\n另有 %.2f 度余额下降发生在缺采区间，未分配到小时累计。\n", r.UnallocatedDrop)
+	}
 	if s.CompleteHours > 0 {
 		average := (s.DayUsage + s.NightUsage) / float64(s.CompleteHours)
-		fmt.Fprintf(&out, "📉 完整小时平均：<code>%.2f</code> 度/小时\n", average)
-		if s.Peak != nil {
-			fmt.Fprintf(&out, "🔝 耗电最高：%s–%s，约 <code>%.2f</code> 度\n", s.Peak.Start.Format("01-02 15:04"), s.Peak.End.Format("15:04"), s.Peak.Usage)
+		if r.WholeDegreeSteps() && s.Covered > 0 {
+			average = s.Usage / s.Covered.Hours()
+			fmt.Fprintf(&out, "📉 有效区间整体平均：<code>%.2f</code> 度/小时\n", average)
+		} else {
+			fmt.Fprintf(&out, "📉 完整小时平均：<code>%.2f</code> 度/小时\n", average)
 		}
-		fmt.Fprintf(&out, "☀️ 白天（08–22点）：约 %.2f 度\n🌙 夜间（22–08点）：约 %.2f 度\n<i>时段对比只含完整小时。</i>\n", s.DayUsage, s.NightUsage)
+		if s.Peak != nil && !r.WholeDegreeSteps() {
+			fmt.Fprintf(&out, "🔝 记录下降最多：%s–%s，约 <code>%.2f</code> 度\n", s.Peak.Start.Format("01-02 15:04"), s.Peak.End.Format("15:04"), s.Peak.Usage)
+		}
+		if !r.WholeDegreeSteps() {
+			fmt.Fprintf(&out, "☀️ 白天（08–22点）：约 %.2f 度\n🌙 夜间（22–08点）：约 %.2f 度\n<i>时段对比只含完整小时。</i>\n", s.DayUsage, s.NightUsage)
+		}
 	} else {
 		out.WriteString("⏳ 尚无完整小时，正在积累采样数据。\n")
 	}
 	if len(r.Increases) > 0 {
 		fmt.Fprintf(&out, "\n💡 检测到 %d 次余额上涨，疑似充值/调整，相关区间不计入耗电。\n", len(r.Increases))
 	}
-	for _, sample := range r.RawSamples {
-		if r.Latest != nil && sample.MeterKey != r.Latest.MeterKey {
-			out.WriteString("\n🏠 范围内更换过房间/电表，统计只含末次观测的电表；原始CSV保留全部采样。\n")
-			break
-		}
+	if r.MeterChanged {
+		out.WriteString("\n🏠 范围内更换过房间/电表，统计只含末次观测的电表；原始CSV保留全部采样。\n")
 	}
 	// Forecast against the recent week, regardless of the selected historical range.
 	if b.LastBalance > 0 && time.Since(b.LastCheck) < time.Hour {
@@ -212,12 +222,24 @@ func (bot *Bot) sendStatsChart(c telebot.Context, b *model.Binding, r history.Re
 	if r.Latest != nil && r.Latest.RoomName != "" {
 		room = r.Latest.RoomName
 	}
-	data, err := charts.Render(r, view, room)
+	pages, err := charts.RenderPages(r, view, room)
 	if err != nil {
 		log.Printf("[Stats] render failed: %v", err)
 		return c.Send("❌ 生成图表失败，请重新选择时间范围。")
 	}
-	return c.Send(&telebot.Photo{File: telebot.FromReader(bytes.NewReader(data)), Caption: "耗电基于余额差估算；灰色表示无有效数据。"})
+	for i, data := range pages {
+		caption := "按余额变化估算；0仅表示余额未下降，不代表没有用电。"
+		if len(pages) > 1 {
+			caption = fmt.Sprintf("第%d/%d张 · ", i+1, len(pages)) + caption
+		}
+		if r.WholeDegreeSteps() {
+			caption += " 本段呈整度阶梯变化，不能精确定位真实用电时段。"
+		}
+		if err := c.Send(&telebot.Photo{File: telebot.FromReader(bytes.NewReader(data)), Caption: caption}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (bot *Bot) handleStatsDate(c telebot.Context) error {

@@ -2,6 +2,7 @@ package history
 
 import (
 	"math"
+	"strings"
 	"time"
 
 	"wanxiao-elec-bot/model"
@@ -48,13 +49,15 @@ type Increase struct {
 }
 
 type Report struct {
-	Start      time.Time
-	End        time.Time
-	Hours      []Hour
-	Samples    []model.BalanceSample
-	RawSamples []model.BalanceSample
-	Latest     *model.BalanceSample
-	Increases  []Increase
+	Start           time.Time
+	End             time.Time
+	Hours           []Hour
+	Samples         []model.BalanceSample
+	RawSamples      []model.BalanceSample
+	Latest          *model.BalanceSample
+	Increases       []Increase
+	MeterChanged    bool
+	UnallocatedDrop float64
 }
 
 // Analyze expects samples in chronological order (as returned by Load). Only
@@ -70,6 +73,14 @@ func Analyze(samples []model.BalanceSample, start, end time.Time) Report {
 		a, b := maxTime(t, start), minTime(t.Add(time.Hour), end)
 		r.Hours = append(r.Hours, Hour{Start: a, End: b, Partial: b.Sub(a) < time.Hour})
 	}
+	// Keep the original export intact. An old cached reading has no meter type;
+	// infer it only when all typed observations for that exact room agree.
+	for _, s := range samples {
+		if valid(s) && !s.ObservedAt.Before(start) && !s.ObservedAt.After(end) {
+			r.RawSamples = append(r.RawSamples, s)
+		}
+	}
+	samples = resolveCachedMeterKeys(samples)
 	for i := range samples {
 		s := samples[i]
 		if !s.ObservedAt.After(end) && valid(s) {
@@ -83,9 +94,10 @@ func Analyze(samples []model.BalanceSample, start, end time.Time) Report {
 	key := r.Latest.MeterKey
 	for _, s := range samples {
 		if valid(s) && !s.ObservedAt.Before(start) && !s.ObservedAt.After(end) {
-			r.RawSamples = append(r.RawSamples, s)
 			if s.MeterKey == key {
 				r.Samples = append(r.Samples, s)
+			} else {
+				r.MeterChanged = true
 			}
 		}
 	}
@@ -101,6 +113,9 @@ func Analyze(samples []model.BalanceSample, start, end time.Time) Report {
 		gap := b.ObservedAt.Sub(a.ObservedAt) > MaxSampleGap
 		delta := a.Balance - b.Balance
 		increase := delta < -1e-6
+		if gap && delta > 0 && !a.ObservedAt.Before(start) && !b.ObservedAt.After(end) {
+			r.UnallocatedDrop += delta
+		}
 		if increase && !b.ObservedAt.After(end) {
 			r.Increases = append(r.Increases, Increase{At: b.ObservedAt, Delta: -delta})
 		}
@@ -120,6 +135,59 @@ func Analyze(samples []model.BalanceSample, start, end time.Time) Report {
 		}
 	}
 	return r
+}
+
+func resolveCachedMeterKeys(samples []model.BalanceSample) []model.BalanceSample {
+	types := make(map[string]string)
+	for _, s := range samples {
+		base, kind, ok := strings.Cut(s.MeterKey, "\x1f")
+		if !ok || kind == "" || !valid(s) {
+			continue
+		}
+		identity := base + "\x00" + s.RoomName
+		if previous, exists := types[identity]; !exists {
+			types[identity] = s.MeterKey
+		} else if previous != s.MeterKey {
+			types[identity] = ""
+		}
+	}
+	out := append([]model.BalanceSample(nil), samples...)
+	for i, s := range out {
+		base, kind, ok := strings.Cut(s.MeterKey, "\x1f")
+		if s.Source != "cached" || !ok || kind != "" {
+			continue
+		}
+		if key := types[base+"\x00"+s.RoomName]; key != "" {
+			out[i].MeterKey = key
+		}
+	}
+	return out
+}
+
+// WholeDegreeSteps describes observed data, not the meter's true precision or
+// update schedule. Repeated whole-degree jumps with flat readings do not locate
+// actual consumption to one hour, so charts and summaries must say so.
+func (r Report) WholeDegreeSteps() bool {
+	drops, flat := 0, 0
+	for i := 1; i < len(r.Samples); i++ {
+		a, b := r.Samples[i-1], r.Samples[i]
+		if a.MeterKey != b.MeterKey || b.ObservedAt.Sub(a.ObservedAt) > MaxSampleGap {
+			continue
+		}
+		delta := a.Balance - b.Balance
+		if math.Abs(delta) < 1e-6 {
+			flat++
+			continue
+		}
+		if delta < 0 {
+			continue
+		}
+		if delta < 1-1e-6 || math.Abs(delta-math.Round(delta)) > 1e-6 {
+			return false
+		}
+		drops++
+	}
+	return drops >= 3 && flat >= drops
 }
 
 func valid(s model.BalanceSample) bool {
