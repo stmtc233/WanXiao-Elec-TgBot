@@ -138,17 +138,16 @@ func (c *canvas) footer(lines ...string) {
 	}
 }
 
-// Render supports hours (up to 48), heatmap, profile, and balance.
+// Render supports hourly and daily consumption, plus secondary analysis views.
 func Render(r history.Report, view, room string) ([]byte, error) {
 	if view == "balance" {
 		return renderBalance(r, room)
 	}
 	if view == "hours" {
-		if len(r.Hours) > 48 {
-			return nil, fmt.Errorf("逐小时图最多显示48小时，请选择日期或热力图")
-		}
-		hours := visibleHours(r)
-		return renderHourPage(r, hours, room, 1, 1)
+		return renderHours(r, room)
+	}
+	if view == "daily" {
+		return renderDaily(r, room)
 	}
 	height := 720
 	if view == "heatmap" {

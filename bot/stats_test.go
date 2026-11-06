@@ -131,23 +131,40 @@ type statsContext struct {
 	userID   int64
 	data     string
 	response string
+	message  *telebot.Message
 	sent     []interface{}
+	calls    []statsCall
 }
 
-func (c *statsContext) Sender() *telebot.User       { return &telebot.User{ID: c.userID} }
-func (c *statsContext) Callback() *telebot.Callback { return &telebot.Callback{Data: c.data} }
+type statsCall struct {
+	method string
+	what   interface{}
+	opts   []interface{}
+}
+
+func (c *statsContext) Sender() *telebot.User { return &telebot.User{ID: c.userID} }
+func (c *statsContext) Callback() *telebot.Callback {
+	return &telebot.Callback{Data: c.data, Message: c.message}
+}
 func (c *statsContext) Respond(r ...*telebot.CallbackResponse) error {
 	if len(r) > 0 {
 		c.response = r[0].Text
 	}
 	return nil
 }
-func (c *statsContext) EditOrSend(what interface{}, _ ...interface{}) error {
+func (c *statsContext) EditOrSend(what interface{}, opts ...interface{}) error {
 	c.sent = append(c.sent, what)
+	c.calls = append(c.calls, statsCall{"editOrSend", what, opts})
 	return nil
 }
-func (c *statsContext) Send(what interface{}, _ ...interface{}) error {
+func (c *statsContext) Send(what interface{}, opts ...interface{}) error {
 	c.sent = append(c.sent, what)
+	c.calls = append(c.calls, statsCall{"send", what, opts})
+	return nil
+}
+func (c *statsContext) EditCaption(caption string, opts ...interface{}) error {
+	c.sent = append(c.sent, caption)
+	c.calls = append(c.calls, statsCall{"editCaption", caption, opts})
 	return nil
 }
 
@@ -158,7 +175,7 @@ func TestStatsCallbacksCannotAccessAnotherUsersBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	bot := &Bot{DB: db}
-	for _, view := range []string{"hours", "heatmap", "profile", "balance", "csv", "summary"} {
+	for _, view := range []string{"hours", "daily", "more-hours", "less-hours", "more-daily", "less-daily", "details", "csv", "summary"} {
 		c := &statsContext{userID: 200, data: strconvID(b.ID) + ":24h:" + view}
 		if err := bot.handleStatsCallback(c); err != nil {
 			t.Fatal(err)
@@ -192,22 +209,22 @@ func TestStatsDashboardChartExportAndUnbind(t *testing.T) {
 		}
 	}
 	bot := &Bot{DB: db, sessions: make(map[int64]*session)}
-	c := &statsContext{userID: 100, data: strconvID(b.ID) + ":24h:summary"}
+	c := &statsContext{userID: 100, data: strconvID(b.ID) + ":today:hours"}
 	if err := bot.handleStatsCallback(c); err != nil {
 		t.Fatal(err)
 	}
-	if len(c.sent) != 2 {
-		t.Fatal("expected text dashboard and chart", len(c.sent))
+	if len(c.sent) != 1 || c.calls[0].method != "editOrSend" {
+		t.Fatal("expected one chart replacement", c.calls)
 	}
-	if _, ok := c.sent[1].(*telebot.Photo); !ok {
+	if _, ok := c.sent[0].(*telebot.Photo); !ok {
 		t.Fatal("dashboard did not include chart")
 	}
 	c = &statsContext{userID: 100, data: strconvID(b.ID) + ":24h:csv"}
 	if err := bot.handleStatsCallback(c); err != nil {
 		t.Fatal(err)
 	}
-	if len(c.sent) != 2 {
-		t.Fatal("expected raw and hourly documents")
+	if len(c.sent) != 3 {
+		t.Fatal("expected raw, hourly and daily documents")
 	}
 	for _, sent := range c.sent {
 		doc, ok := sent.(*telebot.Document)
@@ -226,7 +243,7 @@ func TestStatsDashboardChartExportAndUnbind(t *testing.T) {
 	}
 }
 
-func TestCoarseDashboardExplainsPrecisionAndPagesLongRecords(t *testing.T) {
+func TestCoarseDashboardExplainsPrecisionInOnePhoto(t *testing.T) {
 	db := statsDB(t)
 	end := time.Now().UTC().Truncate(time.Hour)
 	start := end.Add(-14 * time.Hour)
@@ -244,17 +261,11 @@ func TestCoarseDashboardExplainsPrecisionAndPagesLongRecords(t *testing.T) {
 	if err := bot.handleStatsCallback(c); err != nil {
 		t.Fatal(err)
 	}
-	text, ok := c.sent[0].(string)
-	if !ok || !strings.Contains(text, "整度阶梯") || !strings.Contains(text, "整体平均") || strings.Contains(text, "记录下降最多") || strings.Contains(text, "☀️") {
-		t.Fatal("coarse observations were presented as precise hourly patterns", text)
+	if len(c.sent) != 1 || c.calls[0].method != "editOrSend" {
+		t.Fatal("dashboard sent extra messages", c.calls)
 	}
-	if len(c.sent) < 3 {
-		t.Fatal("long records were squeezed into one image", len(c.sent))
-	}
-	for _, item := range c.sent[1:] {
-		photo, ok := item.(*telebot.Photo)
-		if !ok || !strings.Contains(photo.Caption, "不能精确定位") || !strings.Contains(photo.Caption, "张") {
-			t.Fatal(item)
-		}
+	photo, ok := c.sent[0].(*telebot.Photo)
+	if !ok || !strings.Contains(photo.Caption, "整度阶梯") || !strings.Contains(photo.Caption, "不精确") || strings.Contains(photo.Caption, "记录下降最多") {
+		t.Fatal("coarse observations were presented as precise hourly patterns", c.sent)
 	}
 }
