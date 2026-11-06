@@ -45,9 +45,9 @@ func TestSteppedReadingsRemainHonestAndFitOneReadablePhoto(t *testing.T) {
 	if !r.WholeDegreeSteps() || r.MeterChanged || r.Summary().Usage != 3 || r.UnallocatedDrop != 1 {
 		t.Fatal("wrong interpretation of stepped balances", r)
 	}
-	visible := visibleHours(r)
-	if len(visible) != 11 || visible[0].Start.Hour() != 0 || visible[len(visible)-1].Start.Hour() != 10 {
-		t.Fatal("blank hours crowded out the actual records", visible)
+	panels := hourPanels(r)
+	if len(panels) != 2 || len(panels[0].columns) != 12 || len(panels[1].columns) != 12 {
+		t.Fatal("hour slots were lost", panels)
 	}
 	if len(r.Hours) != 24 || len(r.RawSamples) != 21 {
 		t.Fatal("trimming changed export data")
@@ -68,7 +68,7 @@ func TestSteppedReadingsRemainHonestAndFitOneReadablePhoto(t *testing.T) {
 	}
 }
 
-func TestHourPagesPreserveAllIntervalsAndInternalGaps(t *testing.T) {
+func TestHourPanelsPreserveAllIntervalsAndInternalGaps(t *testing.T) {
 	loc := time.FixedZone("CST", 8*60*60)
 	start := time.Date(2026, 11, 1, 0, 0, 0, 0, loc)
 	var samples []model.BalanceSample
@@ -79,15 +79,16 @@ func TestHourPagesPreserveAllIntervalsAndInternalGaps(t *testing.T) {
 		samples = append(samples, model.BalanceSample{ObservedAt: start.Add(time.Duration(i) * 30 * time.Minute), Balance: 100 - float64(i)*0.1, MeterKey: "a"})
 	}
 	r := history.Analyze(samples, start, start.Add(48*time.Hour))
-	if len(visibleHours(r)) != 48 {
-		t.Fatal("internal gap was trimmed")
+	panels := hourPanels(r)
+	if len(panels) != 4 || panels[0].columns[9].complete || panels[0].columns[10].complete {
+		t.Fatal("missing intervals were hidden or fabricated", panels)
 	}
 	pages, err := RenderPages(r, "hours", "测试宿舍")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pages) != 4 {
-		t.Fatal("48 hours should be four pages", len(pages))
+	if len(pages) != 1 {
+		t.Fatal("one request must produce one chart", len(pages))
 	}
 	for _, data := range pages {
 		img, err := png.Decode(bytes.NewReader(data))

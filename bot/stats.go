@@ -3,6 +3,7 @@ package bot
 import (
 	"bytes"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -20,6 +21,10 @@ func statsRange(period string, now time.Time) (time.Time, time.Time, error) {
 	now = now.In(displayLoc)
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, displayLoc)
 	switch period {
+	case "today":
+		return today, now, nil
+	case "yesterday":
+		return today.AddDate(0, 0, -1), today, nil
 	case "24h":
 		return now.Truncate(time.Hour).Add(-23 * time.Hour), now, nil
 	case "48h":
@@ -71,32 +76,125 @@ func (bot *Bot) handleStats(c telebot.Context) error {
 		return noBindingsReply(c)
 	}
 	if len(bindings) == 1 {
-		return bot.showStats(c, &bindings[0], "24h")
+		return bot.showStats(c, &bindings[0], "today")
 	}
 	var rows []telebot.Row
 	for _, b := range bindings {
-		rows = append(rows, telebot.Row{{Text: "🏠 " + roomDisplay(&b), Unique: btnStatsEndpoint.Unique, Data: fmt.Sprintf("%d:24h:summary", b.ID)}})
+		rows = append(rows, telebot.Row{{Text: "🏠 " + roomDisplay(&b), Unique: btnStatsEndpoint.Unique, Data: fmt.Sprintf("%d:today:hours", b.ID)}})
+	}
+	// A photo cannot be edited into text. Reuse its caption and keyboard for
+	// account selection, then replace the photo after an account is chosen.
+	if cb := c.Callback(); cb != nil && cb.Message != nil && cb.Message.Photo != nil {
+		err := c.EditCaption("📊 <b>用电统计</b>\n\n请选择账号：", inlineMarkup(rows...), telebot.ModeHTML)
+		if errors.Is(err, telebot.ErrMessageNotModified) {
+			return nil
+		}
+		return err
 	}
 	return editOrSend(c, "📊 <b>用电统计</b>\n\n请选择要查看的账号：", inlineMarkup(rows...), telebot.ModeHTML)
 }
 
-func statsMarkup(id uint, period string, hours int) *telebot.ReplyMarkup {
+func statsMarkup(id uint, period, view string, more, multiple bool, now time.Time) *telebot.ReplyMarkup {
 	button := func(text, p, v string) telebot.Btn {
 		return telebot.Btn{Text: text, Unique: btnStatsEndpoint.Unique, Data: fmt.Sprintf("%d:%s:%s", id, p, v)}
 	}
+	selected := func(text string, active bool) string {
+		if active {
+			return "✓ " + text
+		}
+		return text
+	}
+	hourPeriod := chartPeriod(period, "hours", now)
+	dailyPeriod := chartPeriod(period, "daily", now)
+	if view == "daily" {
+		dailyPeriod = period
+	}
 	rows := []telebot.Row{
-		{button("近24小时", "24h", "summary"), button("近48小时", "48h", "summary")},
-		{button("近7天", "7d", "summary"), button("近30天", "30d", "summary")},
-		{button("本月", "month", "summary"), button("上月", "prevmonth", "summary"), {Text: "📅 选日期", Unique: btnStatsDate.Unique, Data: strconv.FormatUint(uint64(id), 10)}},
+		{button(selected("每小时", view == "hours"), hourPeriod, "hours"), button(selected("每天", view == "daily"), dailyPeriod, "daily")},
 	}
-	if hours <= 48 {
-		rows = append(rows, telebot.Row{button("📊 每小时耗电", period, "hours"), button("🟩 小时热力图", period, "heatmap")})
+	if view == "hours" {
+		start, _, _ := statsRange(period, now)
+		today, _, _ := statsRange("today", now)
+		row := telebot.Row{button("‹ 前一天", dayPeriod(start.AddDate(0, 0, -1)), "hours"), button(selected("今天", start.Equal(today)), "today", "hours")}
+		if next := start.AddDate(0, 0, 1); !next.After(today) {
+			row = append(row, button("后一天 ›", dayPeriod(next), "hours"))
+		}
+		rows = append(rows, row)
 	} else {
-		rows = append(rows, telebot.Row{button("🟩 小时热力图", period, "heatmap")})
+		rows = append(rows, telebot.Row{button(selected("近7天", period == "7d"), "7d", "daily"), button(selected("近30天", period == "30d"), "30d", "daily"), button(selected("本月", period == "month"), "month", "daily")})
 	}
-	rows = append(rows, telebot.Row{button("🕘 时段平均", period, "profile"), button("📈 余额趋势", period, "balance")},
-		telebot.Row{button("📄 导出CSV", period, "csv"), button("🔄 更新统计", period, "summary")}, telebot.Row{{Text: "↩️ 选择账号", Unique: btnStatsBack.Unique}})
+	moreText, moreAction := "更多", "more-"+view
+	if more {
+		moreText, moreAction = "收起", "less-"+view
+	}
+	rows = append(rows, telebot.Row{{Text: "📅 选日期", Unique: btnStatsDate.Unique, Data: strconv.FormatUint(uint64(id), 10)}, button(moreText, period, moreAction)})
+	if more {
+		if view == "daily" {
+			// Seven recent calendar days are directly reachable from the daily
+			// view. Older dates remain available through the date input.
+			start, end, _ := statsRange(period, now)
+			last := end.Add(-time.Nanosecond)
+			last = time.Date(last.Year(), last.Month(), last.Day(), 0, 0, 0, 0, displayLoc)
+			var row telebot.Row
+			for day := maxDate(start, last.AddDate(0, 0, -6)); !day.After(last); day = day.AddDate(0, 0, 1) {
+				row = append(row, button(day.Format("01-02")+"逐时", dayPeriod(day), "hours"))
+				if len(row) == 4 {
+					rows = append(rows, row)
+					row = nil
+				}
+			}
+			if len(row) > 0 {
+				rows = append(rows, row)
+			}
+		}
+		rows = append(rows, telebot.Row{button("📄 导出CSV", period, "csv"), button("↻ 更新", period, view)})
+		if view == "daily" {
+			rows = append(rows, telebot.Row{button("上月", "prevmonth", "daily")})
+		}
+		if multiple {
+			rows = append(rows, telebot.Row{{Text: "切换账号", Unique: btnStatsBack.Unique}})
+		}
+	}
 	return inlineMarkup(rows...)
+}
+
+func maxDate(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
+}
+
+func dayPeriod(day time.Time) string {
+	return day.Format("20060102") + "-" + day.Format("20060102")
+}
+
+// Each hourly chart shows one calendar day. Switching back from a daily
+// range opens its last day, so historical selections do not jump to today.
+func chartPeriod(period, view string, now time.Time) string {
+	start, end, err := statsRange(period, now)
+	if err != nil {
+		return "today"
+	}
+	last := end.Add(-time.Nanosecond)
+	if !end.After(start) {
+		last = start
+	}
+	oneDay := start.Format("20060102") == last.Format("20060102")
+	if view == "daily" {
+		if oneDay {
+			today, _, _ := statsRange("today", now)
+			if start.Before(today) {
+				return start.AddDate(0, 0, -6).Format("20060102") + "-" + start.Format("20060102")
+			}
+			return "7d"
+		}
+		return period
+	}
+	if oneDay {
+		return period
+	}
+	return dayPeriod(last)
 }
 
 func (bot *Bot) loadStats(b *model.Binding, period string) (history.Report, error) {
@@ -111,74 +209,16 @@ func (bot *Bot) loadStats(b *model.Binding, period string) (history.Report, erro
 	return history.Analyze(samples, start, end), nil
 }
 
+func statsView(period string, now time.Time) string {
+	start, end, err := statsRange(period, now)
+	if err != nil || !end.After(start) || start.Format("20060102") == end.Add(-time.Nanosecond).Format("20060102") {
+		return "hours"
+	}
+	return "daily"
+}
+
 func (bot *Bot) showStats(c telebot.Context, b *model.Binding, period string) error {
-	r, err := bot.loadStats(b, period)
-	if err != nil {
-		log.Printf("[Stats] load failed: %v", err)
-		return c.Send("❌ 读取历史失败，请稍后再试。")
-	}
-	s := r.Summary()
-	room := roomDisplay(b)
-	if r.Latest != nil && r.Latest.RoomName != "" {
-		room = r.Latest.RoomName
-	}
-	var out strings.Builder
-	fmt.Fprintf(&out, "📊 <b>用电统计 · %s</b>\n%s 至 %s（北京时间）\n\n", esc(room), r.Start.Format("01-02 15:04"), r.End.Format("01-02 15:04"))
-	if !b.LastCheck.IsZero() {
-		fmt.Fprintf(&out, "🔋 账号最新余额：<code>%.2f</code> 度（%s）\n", b.LastBalance, formatAgo(b.LastCheck))
-		if room != roomDisplay(b) {
-			fmt.Fprintf(&out, "当前绑定房间：%s\n", esc(roomDisplay(b)))
-		}
-	}
-	fmt.Fprintf(&out, "⚡ 有效区间累计下降：<code>%.2f</code> 度\n🕘 采样完整小时：<code>%d / %d</code>\n", s.Usage, s.CompleteHours, len(r.Hours))
-	if r.WholeDegreeSteps() {
-		out.WriteString("\n⚠️ 本段余额呈整度阶梯变化，无法精确判断真实用电发生在哪个小时。0仅表示余额未下降。\n\n")
-	}
-	if r.UnallocatedDrop > 0 {
-		fmt.Fprintf(&out, "\n另有 %.2f 度余额下降发生在缺采区间，未分配到小时累计。\n", r.UnallocatedDrop)
-	}
-	if s.CompleteHours > 0 {
-		average := (s.DayUsage + s.NightUsage) / float64(s.CompleteHours)
-		if r.WholeDegreeSteps() && s.Covered > 0 {
-			average = s.Usage / s.Covered.Hours()
-			fmt.Fprintf(&out, "📉 有效区间整体平均：<code>%.2f</code> 度/小时\n", average)
-		} else {
-			fmt.Fprintf(&out, "📉 完整小时平均：<code>%.2f</code> 度/小时\n", average)
-		}
-		if s.Peak != nil && !r.WholeDegreeSteps() {
-			fmt.Fprintf(&out, "🔝 记录下降最多：%s–%s，约 <code>%.2f</code> 度\n", s.Peak.Start.Format("01-02 15:04"), s.Peak.End.Format("15:04"), s.Peak.Usage)
-		}
-		if !r.WholeDegreeSteps() {
-			fmt.Fprintf(&out, "☀️ 白天（08–22点）：约 %.2f 度\n🌙 夜间（22–08点）：约 %.2f 度\n<i>时段对比只含完整小时。</i>\n", s.DayUsage, s.NightUsage)
-		}
-	} else {
-		out.WriteString("⏳ 尚无完整小时，正在积累采样数据。\n")
-	}
-	if len(r.Increases) > 0 {
-		fmt.Fprintf(&out, "\n💡 检测到 %d 次余额上涨，疑似充值/调整，相关区间不计入耗电。\n", len(r.Increases))
-	}
-	if r.MeterChanged {
-		out.WriteString("\n🏠 范围内更换过房间/电表，统计只含末次观测的电表；原始CSV保留全部采样。\n")
-	}
-	// Forecast against the recent week, regardless of the selected historical range.
-	if b.LastBalance > 0 && time.Since(b.LastCheck) < time.Hour {
-		if recent, err := bot.loadStats(b, "7d"); err == nil {
-			weekly := recent.Summary()
-			if weekly.CompleteHours >= 72 && weekly.DayUsage+weekly.NightUsage > 0 {
-				days := b.LastBalance / (weekly.DayUsage + weekly.NightUsage) * float64(weekly.CompleteHours) / 24
-				fmt.Fprintf(&out, "\n🔮 按近7天有效小时估算，当前余额约可用 %.1f 天。\n", days)
-			}
-		}
-	}
-	out.WriteString("\n每小时 00、30 分自动采样，预警共用这次检查。\n耗电由余额差估算；跨整点按时间分摊。缺失或充值期间可能低估，余额延迟更新会影响小时归属。")
-	if err := editOrSend(c, out.String(), statsMarkup(b.ID, period, len(r.Hours)), telebot.ModeHTML); err != nil {
-		return err
-	}
-	view := "hours"
-	if len(r.Hours) > 48 {
-		view = "heatmap"
-	}
-	return bot.sendStatsChart(c, b, r, view)
+	return bot.showStatsChart(c, b, period, statsView(period, time.Now()), false)
 }
 
 func (bot *Bot) handleStatsCallback(c telebot.Context) error {
@@ -196,50 +236,98 @@ func (bot *Bot) handleStatsCallback(c telebot.Context) error {
 		respond(c, "时间范围无效，请重新选择")
 		return nil
 	}
+	view, more := parts[2], false
+	switch view {
+	case "hours", "daily", "csv":
+	case "more-hours", "more-daily":
+		view, more = strings.TrimPrefix(view, "more-"), true
+	case "less-hours", "less-daily":
+		view = strings.TrimPrefix(view, "less-")
+	case "more", "details":
+		view, more = statsView(parts[1], time.Now()), true
+	case "summary", "less":
+		view = statsView(parts[1], time.Now())
+	default:
+		respond(c, "请重新打开用电统计")
+		return nil
+	}
 	if !bot.tryLock(c.Sender().ID) {
 		respond(c, "正在生成统计，请稍候…")
 		return nil
 	}
 	defer bot.unlock(c.Sender().ID)
-	respond(c, "正在读取历史…")
+	respond(c)
 	bot.clearState(c.Sender().ID)
-	if parts[2] == "summary" {
-		return bot.showStats(c, b, parts[1])
+	if view == "csv" {
+		r, err := bot.loadStats(b, parts[1])
+		if err != nil {
+			log.Printf("[Stats] load failed: %v", err)
+			return c.Send("❌ 读取历史失败，请稍后再试。")
+		}
+		return bot.exportStats(c, b, r)
 	}
-	r, err := bot.loadStats(b, parts[1])
+	period := parts[1]
+	if view == "hours" {
+		period = chartPeriod(period, view, time.Now())
+	}
+	return bot.showStatsChart(c, b, period, view, more)
+}
+
+func (bot *Bot) showStatsChart(c telebot.Context, b *model.Binding, period, view string, more bool) error {
+	r, err := bot.loadStats(b, period)
 	if err != nil {
 		log.Printf("[Stats] load failed: %v", err)
 		return c.Send("❌ 读取历史失败，请稍后再试。")
 	}
-	if parts[2] == "csv" {
-		return bot.exportStats(c, b, r)
-	}
-	return bot.sendStatsChart(c, b, r, parts[2])
-}
-
-func (bot *Bot) sendStatsChart(c telebot.Context, b *model.Binding, r history.Report, view string) error {
 	room := roomDisplay(b)
 	if r.Latest != nil && r.Latest.RoomName != "" {
 		room = r.Latest.RoomName
 	}
-	pages, err := charts.RenderPages(r, view, room)
+	data, err := charts.Render(r, view, room)
 	if err != nil {
 		log.Printf("[Stats] render failed: %v", err)
-		return c.Send("❌ 生成图表失败，请重新选择时间范围。")
+		return c.Send("❌ 生成图表失败，请重新选择日期。")
 	}
-	for i, data := range pages {
-		caption := "按余额变化估算；0仅表示余额未下降，不代表没有用电。"
-		if len(pages) > 1 {
-			caption = fmt.Sprintf("第%d/%d张 · ", i+1, len(pages)) + caption
-		}
-		if r.WholeDegreeSteps() {
-			caption += " 本段呈整度阶梯变化，不能精确定位真实用电时段。"
-		}
-		if err := c.Send(&telebot.Photo{File: telebot.FromReader(bytes.NewReader(data)), Caption: caption}); err != nil {
-			return err
-		}
+	bindings, err := bot.userBindings(c.Sender().ID)
+	if err != nil {
+		return c.Send("❌ 读取账号信息失败，请稍后再试。")
 	}
-	return nil
+	photo := &telebot.Photo{File: telebot.FromReader(bytes.NewReader(data)), Caption: statsCaption(r, view, more)}
+	return editOrSend(c, photo, statsMarkup(b.ID, period, view, more, len(bindings) > 1, time.Now()), telebot.ModeHTML)
+}
+
+func statsCaption(r history.Report, view string, more bool) string {
+	var out strings.Builder
+	if view == "hours" {
+		fmt.Fprintf(&out, "<b>%s · 每小时耗电</b>", r.Start.Format("2006-01-02"))
+	} else {
+		last := r.End.Add(-time.Nanosecond)
+		if last.Before(r.Start) {
+			last = r.Start
+		}
+		fmt.Fprintf(&out, "<b>%s 至 %s · 每天耗电</b>", r.Start.Format("2006-01-02"), last.Format("2006-01-02"))
+	}
+	out.WriteString("\n耗电由余额变化估算；0表示读数未下降。")
+	if r.WholeDegreeSteps() {
+		out.WriteString("\n⚠️ 余额呈整度阶梯变化，小时归属不精确。")
+	}
+	if r.UnallocatedDrop > 0 {
+		fmt.Fprintf(&out, "\n缺采期间另有 %s 度下降，未计入图中。", statsUsage(r.UnallocatedDrop))
+	}
+	if r.MeterChanged {
+		out.WriteString("\n范围内更换过房间或电表，仅统计最后的电表。")
+	}
+	if more {
+		out.WriteString("\n\n<b>统计说明</b>\n每30分钟自动采样；跨整点按时间分摊。\n橙色：仅有部分数据；—：无有效数据；未到：未来时段。\n缺采和余额上涨区间不计入耗电，统计可能偏低。\n日均只用完整日期，当天不参与。\n上游读数延迟更新会影响耗电归属。CSV保留原始采样、每小时及每天统计。")
+	}
+	return out.String()
+}
+
+func statsUsage(value float64) string {
+	if value > 0 && value < 0.005 {
+		return "&lt;0.01"
+	}
+	return strconv.FormatFloat(value, 'f', 2, 64)
 }
 
 func (bot *Bot) handleStatsDate(c telebot.Context) error {
@@ -334,11 +422,31 @@ func hourlyCSV(r history.Report) ([]byte, error) {
 	return out.Bytes(), w.Error()
 }
 
+func dailyCSV(r history.Report) ([]byte, error) {
+	var out bytes.Buffer
+	out.WriteString("\xef\xbb\xbf")
+	w := csv.NewWriter(&out)
+	if err := w.Write([]string{"日期（北京时间）", "估算耗电（度）", "有效覆盖分钟", "状态"}); err != nil {
+		return nil, err
+	}
+	for _, d := range r.Days() {
+		usage := ""
+		if d.Covered > 0 {
+			usage = strconv.FormatFloat(d.Usage, 'f', 4, 64)
+		}
+		if err := w.Write([]string{d.Start.Format("2006-01-02"), usage, fmt.Sprintf("%.1f", d.Covered.Minutes()), d.Status()}); err != nil {
+			return nil, err
+		}
+	}
+	w.Flush()
+	return out.Bytes(), w.Error()
+}
+
 func (bot *Bot) exportStats(c telebot.Context, b *model.Binding, r history.Report) error {
 	for _, item := range []struct {
 		name   string
 		encode func(history.Report) ([]byte, error)
-	}{{"samples", rawCSV}, {"hourly", hourlyCSV}} {
+	}{{"samples", rawCSV}, {"hourly", hourlyCSV}, {"daily", dailyCSV}} {
 		data, err := item.encode(r)
 		if err != nil {
 			return err
