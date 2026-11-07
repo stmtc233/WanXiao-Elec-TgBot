@@ -94,7 +94,7 @@ var botCommands = []telebot.Command{
 	{Text: "recharge", Description: "充值电费"},
 	{Text: "accounts", Description: "账号管理"},
 	{Text: "settings", Description: "预警设置"},
-	{Text: "stats", Description: "每小时用电统计与图表"},
+	{Text: "stats", Description: "每小时与每天耗电"},
 	{Text: "cancel", Description: "取消当前操作"},
 	{Text: "help", Description: "使用帮助"},
 }

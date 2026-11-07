@@ -31,7 +31,7 @@ func TestChartsRenderOfflineWithChineseFont(t *testing.T) {
 		}
 		samples = append(samples, model.BalanceSample{ObservedAt: at, Balance: balance, MeterKey: "a", RoomName: "测试宿舍 301"})
 	}
-	for _, view := range []string{"hours", "heatmap", "profile", "balance"} {
+	for _, view := range []string{"hours", "daily", "heatmap", "profile", "balance"} {
 		t.Run(view, func(t *testing.T) {
 			end := start.Add(7 * 24 * time.Hour)
 			from := start
@@ -83,7 +83,7 @@ func TestEmptyReportRendersAndLongHourlyRangeIsRejected(t *testing.T) {
 }
 
 func expectedWidth(view string) int {
-	if view == "hours" || view == "balance" {
+	if view == "hours" || view == "daily" || view == "balance" {
 		return 900
 	}
 	return 1240
